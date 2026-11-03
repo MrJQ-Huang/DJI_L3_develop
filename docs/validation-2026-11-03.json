@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-03",
+  "environment": "Windows hardware validation; Linux not yet hardware-validated",
+  "camera_type": "ZENMUSE_L3",
+  "camera_port_observed": "PORT_1",
+  "video_source_observed": "WIDE_CAMERA",
+  "source_range_observed": [
+    "WIDE_CAMERA",
+    "POINT_CLOUD_CAMERA"
+  ],
+  "sample_rate_cap_fps": 5,
+  "jpeg_quality": 80,
+  "previous_steady_window_seconds": 24.09,
+  "previous_steady_window_receive_fps": 4.57,
+  "snapshot": {
+    "event": "stopped",
+    "frames_received": 887,
+    "connections": 1,
+    "protocol_errors": 0,
+    "superseded_frames": 19,
+    "runtime_seconds": 242.109,
+    "average_receive_fps": 3.664,
+    "width": 1920,
+    "height": 1080
+  },
+  "notes": [
+    "Runtime and average include initial waiting; not the native camera frame rate.",
+    "Zero protocol errors does not prove zero radio packet loss.",
+    "No raw images, device identities, remote timestamps or keys included."
+  ]
+}
