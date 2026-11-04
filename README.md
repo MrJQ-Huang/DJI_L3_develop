@@ -1,5 +1,7 @@
 # DJI L3 开发交接
 
+2026-11-04 更新：取得妙算 3后的硬件准备、PSDK 真实点云订阅、电脑传输与 PointCloud2/RViz 验收流程见 [妙算 3点云开发流程](docs/MANIFOLD3_POINTCLOUD_WORKFLOW.md)。本机 Linux RGB/RViz 已验证，真实 XYZ 尚未接通；下文未更新条目保留原交接阶段的记录。
+
 本仓库保存 2026-11-03 在 Windows 上完成的 Matrice 400 / Zenmuse L3 / DJI RC Plus 2 图像取帧原型，以及交给 Linux 开发环境的接续说明。
 
 **用户硬性要求：严禁起飞，只允许获取 L3 数据。所有验证均为地面验证。**
