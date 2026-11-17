@@ -943,21 +943,13 @@ static int report_video_info(E_DjiMountPosition mount, const char *phase)
 
 static bool check_video_source(E_DjiMountPosition mount, unsigned int expected)
 {
-    E_DjiCameraType type = DJI_CAMERA_TYPE_UNKNOWN;
-    T_DjiCameraManagerRangeList range = {0};
-    T_DjiCameraCurrentCameraStatus current = {0};
-    if (DjiCameraManager_GetCameraType(mount, &type) != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS ||
-        type != DJI_CAMERA_TYPE_L3 ||
-        DjiCameraManager_GetStreamSourceRange(mount, &range) != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS ||
-        range.size == 0 || range.size > sizeof(range.streamSource) / sizeof(range.streamSource[0]) ||
-        DjiCameraManager_GetCurrentCameraStatus(mount, &current) != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS)
+    L3VideoControlResult current = l3_video_source_read(mount);
+    if (!current.confirmed)
         return false;
-    bool found = false;
-    for (size_t i = 0; i < range.size; ++i)
-        found |= (unsigned int)range.streamSource[i] == expected;
-    bool matched = found && current.liveview_source_stream == expected;
-    printf("event=video_source phase=check current=%u expected=%u matched=%s source_write=no\n",
-           current.liveview_source_stream, expected, matched ? "yes" : "no");
+    bool matched = (expected == L3_VIDEO_SOURCE_VISIBLE || expected == L3_VIDEO_SOURCE_POINT_CLOUD) &&
+                   current.current_source == (int)expected;
+    printf("event=video_source phase=check current=%d expected=%u matched=%s source_write=no\n",
+           current.current_source, expected, matched ? "yes" : "no");
     return matched;
 }
 
@@ -971,7 +963,7 @@ static void video_control_event(const char *action, int requested, L3VideoContro
 typedef struct { char line[32]; size_t used; bool discard; } VideoCommand;
 
 /* One bounded input read per iteration; never interpret stdin as shell or SDK
- * packets. Source 7 is VISIBLE_CAM; 14 was advertised/visually verified on L3.
+ * packets. L3's actual camera sources are 1 (wide visible) and 14 (2D points).
  * These IDs must NOT be passed as Liveview source arguments. */
 static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3Stream *stream)
 {
@@ -994,7 +986,8 @@ static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3
             video_control_event("status", -1, l3_video_source_read(mount));
         } else if (!input->discard &&
                    (strcmp(input->line, "visible") == 0 || strcmp(input->line, "point") == 0)) {
-            unsigned int source = strcmp(input->line, "visible") == 0 ? DJI_CAMERA_MANAGER_SOURCE_VISIBLE_CAM : 14;
+            unsigned int source = strcmp(input->line, "visible") == 0 ?
+                                  L3_VIDEO_SOURCE_VISIBLE : L3_VIDEO_SOURCE_POINT_CLOUD;
             L3VideoControlResult result = l3_video_source_set(mount, source);
             /* A failed ACK can still leave the source changed or unknown. In
              * that case invalidate the old decoder too, without claiming success. */

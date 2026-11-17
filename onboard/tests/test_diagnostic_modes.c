@@ -23,8 +23,8 @@ T_DjiReturnCode DjiCameraManager_GetStreamSourceRange(E_DjiMountPosition mount,
     (void)mount;
     ++range_queries;
     range->size = range_size;
-    range->streamSource[0] = DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM;
-    range->streamSource[1] = DJI_CAMERA_MANAGER_SOURCE_DEFAULT_CAM;
+    range->streamSource[0] = DJI_CAMERA_MANAGER_SOURCE_VISIBLE_CAM; /* SDK's incorrect static table. */
+    range->streamSource[1] = (E_DjiCameraManagerStreamSource)14;
     return metadata_error ? DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT : DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 T_DjiReturnCode DjiCameraManager_GetCurrentCameraStatus(E_DjiMountPosition mount,
@@ -35,9 +35,12 @@ T_DjiReturnCode DjiCameraManager_GetCurrentCameraStatus(E_DjiMountPosition mount
     return metadata_error ? DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT : DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
-T_DjiReturnCode DjiCameraManager_SetStreamSource(E_DjiMountPosition mount, E_DjiCameraManagerStreamSource source)
+T_DjiReturnCode DjiCameraManagerUtil_ActionSync(
+    E_DjiMountPosition mount, uint8_t command_set, uint8_t command_id,
+    const uint8_t *data, uint32_t length, void *response_info, uint8_t *ack, uint16_t capacity)
 {
-    (void)mount; (void)source;
+    (void)mount; (void)command_set; (void)command_id; (void)data;
+    (void)length; (void)response_info; (void)ack; (void)capacity;
     assert(!"no source writes in diagnostic/read-only tests");
     return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT;
 }
@@ -115,9 +118,10 @@ int main(void)
     assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 14));
     assert(check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM));
     assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_DEFAULT_CAM));
-    range_size = 17;
-    assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM));
-    range_size = 2;
+    assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_VISIBLE_CAM));
+    current_source = 14;
+    assert(check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 14));
+    current_source = DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM;
     wrong_camera = true;
     assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM));
     wrong_camera = false;

@@ -46,6 +46,12 @@ set(PSDK_LIBRARY "${PSDK_ROOT}/psdk_lib/lib/aarch64-linux-gnu-gcc/libpayloadsdk.
 if(NOT EXISTS "${PSDK_LIBRARY}")
     message(FATAL_ERROR "Official aarch64-linux-gnu-gcc/libpayloadsdk.a missing")
 endif()
+# l3_video_control uses the camera transport ABI from this exact SDK archive.
+# Validate independently of the optional, unrelated USB padding correction.
+file(SHA256 "${PSDK_LIBRARY}" L3_SOURCE_SDK_SHA256)
+if(NOT L3_SOURCE_SDK_SHA256 STREQUAL "5725cc72824d915410be59e98cb31b4d269510c4615c1033da8d5fffbffdb5e7")
+    message(FATAL_ERROR "L3 source control requires the pinned official PSDK 3.18 ARM64 archive")
+endif()
 if(L3_FIX_MOP_USB_PADDING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     if(BUILD_TESTING)

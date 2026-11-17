@@ -15,7 +15,7 @@ import time
 
 from l3_stream import StreamReceiver
 
-SOURCE_NAMES = {7: "可见光", 14: "点云画面（二维）"}
+SOURCE_NAMES = {1: "可见光", 14: "点云画面（二维）"}
 UNSUPPORTED = "0x00000021000000e0"
 
 
@@ -44,7 +44,7 @@ class PreviewState:
             if event.get("success") == "yes" and str(current) == event.get("requested"):
                 self.message = "设备已确认画面源，等待新视频帧"
             elif event.get("code") == UNSUPPORTED:
-                self.message = "切换失败：PSDK 对此设备未开放切源；仍显示实际选中的画面"
+                self.message = "设备拒绝此次切源；仍显示实际选中的画面"
             else:
                 self.message = "切换未确认：" + event.get("code", "未知错误")
         elif current is None:
@@ -223,11 +223,17 @@ class PreviewApp:
         self.receiver = None
         self.session.send("stop")
         with self.session.lock:
-            self.session.state.message = "视频连接中断，正在重新订阅原始高清流…"
+            self.session.state.message = ("正在切换画面，重新订阅原始高清流…" if source is not None else
+                                          "视频连接中断，正在重新订阅原始高清流…")
+
+    def can_switch(self, state):
+        return (not self.recovering and not state.pending and self.session.ready.is_set() and
+                not self.session.finished.is_set() and state.current in SOURCE_NAMES and
+                time.monotonic() - self.started < self.args.seconds - 10)
 
     def switch(self):
         state = self.session.snapshot()
-        if state.current in SOURCE_NAMES:
+        if self.can_switch(state):
             self.session.send("visible" if state.current == 14 else "point")
 
     def tick(self):
@@ -238,8 +244,7 @@ class PreviewApp:
             self.source_text.set("当前画面：" + label)
             self.message_text.set(state.message)
             self.toggle.configure(text="切到可见光" if state.current == 14 else "切到点云画面",
-                                  state="normal" if self.session.ready.is_set() and
-                                  state.current in SOURCE_NAMES and not state.pending and not self.recovering else "disabled")
+                                  state="normal" if self.can_switch(state) else "disabled")
         if self.session.ready.is_set() and self.receiver is None and not self.recovering:
             self.generation = state.generation
             self.active_source = state.current
@@ -285,7 +290,9 @@ class PreviewApp:
                                   "mbps": round(mbps, 2), "fps": round(fps, 2), **stats}), flush=True)
                 self.previous_bytes, self.previous_frames = stats["video_bytes"], stats["video_frames"]
                 self.last_report = now
-            if stats["video_disconnects"] > 0 and not self.session.finished.is_set():
+            # The device resets video before its switch ACK reaches SSH. Let
+            # that ACK establish the actual source before choosing a restart.
+            if stats["video_disconnects"] > 0 and not state.pending and not self.session.finished.is_set():
                 self.request_recovery(now)
         if now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and not self.recovering:
             self.session.send("status")
@@ -296,8 +303,12 @@ class PreviewApp:
                 self.session.close()
                 session_args = argparse.Namespace(**vars(self.args))
                 session_args.seconds = remaining
-                if self.restart_source is not None:
-                    session_args.expected_source = self.restart_source
+                # A switch result can arrive while the old session drains.
+                # Its final readback takes precedence over the earlier snapshot.
+                final_source = self.session.snapshot().current
+                restart_source = final_source if final_source in SOURCE_NAMES else self.restart_source
+                if restart_source is not None:
+                    session_args.expected_source = restart_source
                 self.session = PreviewSession(session_args)
                 self.session.start()
                 self.restarts += 1
