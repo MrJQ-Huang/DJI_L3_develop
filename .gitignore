@@ -27,4 +27,6 @@ first_frame.*
 *.db3
 .env
 .env.*
+!docs/dji-support-2026-11-17/logs/
+!docs/dji-support-2026-11-17/logs/*.log
 

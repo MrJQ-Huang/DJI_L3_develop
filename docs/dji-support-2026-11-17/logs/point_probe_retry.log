@@ -1,0 +1,30 @@
+event=point_probe phase=tcp_connect_begin timeout_ms=2000
+event=point_probe phase=tcp_connect connected=yes port=9010 sink_timeout_ms=200
+event=platform socket_adapter=bounded_nonblocking sysctl_writes=none
+event=phase_result phase=register_osal code=0x0000000000000000
+event=phase_result phase=register_private_log code=0x0000000000000000
+event=phase_result phase=register_usb_bulk code=0x0000000000000000
+event=phase_result phase=register_socket code=0x0000000000000000
+event=phase_result phase=register_filesystem code=0x0000000000000000
+event=phase_begin phase=core_init blocking=yes
+event=phase_result phase=core_init code=0x0000000000000000
+event=phase_begin phase=aircraft_info blocking=yes
+event=phase_result phase=aircraft_info code=0x0000000000000000
+event=aircraft model=M400
+event=phase_begin phase=aircraft_version blocking=yes
+event=phase_result phase=aircraft_version code=0x0000000000000000
+event=aircraft_version major=19 minor=1 modify=10 debug=3
+event=phase_begin phase=camera_manager_init blocking=yes
+event=phase_result phase=camera_manager_init code=0x0000000000000000
+event=phase_begin phase=application_start blocking=yes
+event=phase_result phase=application_start code=0x0000000000000000
+event=phase_begin phase=camera_type psdk_port=1 blocking=yes
+event=camera_type psdk_port=1 camera_type=117 is_l3=yes code=0x0000000000000000
+event=summary camera_query_successes=1 l3_ports_found=1 interrupted=no
+event=point_probe phase=begin psdk_port=1 seconds=20 max_packets=30 max_attempts=60 exclusive_test=yes recording_start=explicit
+event=point_probe phase=stop_confirmation start_attempted=yes stop_attempts=1 stop_finished=yes command_ack=yes stopcode=0x0000000000000000 sensor_state_verified=no
+event=point_probe phase=summary outcome=7 start_finished=yes reader_started=yes reader_finished=no cleanup_safe=no sink_failed=no cancelled=no clock_failed=no
+event=point_probe phase=sdk_codes camera_type=0x0000000000000000 mop_init=0x0000000000000000 start=0x0000000000000000 stop=0x0000000000000000
+event=point_probe phase=reader_stats complete=no result=3 attempts=0 packets=0 malformed=0 sdk_code=0x0000000000000000 close_code=0x0000000000000000 destroy_code=0x0000000000000000
+event=point_probe phase=timing start_requested_monotonic_ns=1411405633344 deadline_monotonic_ns=1431405633344 last_stop_requested_monotonic_ns=1431405727456 stop_ack_monotonic_ns=1431829974048
+event=point_probe phase=exit cleanup_safe=no sdk_cleanup=skipped fd_context=retained_until_process_exit

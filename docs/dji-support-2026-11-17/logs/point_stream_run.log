@@ -1,0 +1,28 @@
+event=platform socket_adapter=bounded_nonblocking sysctl_writes=none
+event=phase_result phase=register_osal code=0x0000000000000000
+event=phase_result phase=register_private_log code=0x0000000000000000
+event=phase_result phase=register_usb_bulk code=0x0000000000000000
+event=phase_result phase=register_socket code=0x0000000000000000
+event=phase_result phase=register_filesystem code=0x0000000000000000
+event=phase_begin phase=core_init blocking=yes
+event=phase_result phase=core_init code=0x0000000000000000
+event=phase_begin phase=aircraft_info blocking=yes
+event=phase_result phase=aircraft_info code=0x0000000000000000
+event=aircraft model=M400
+event=phase_begin phase=aircraft_version blocking=yes
+event=phase_result phase=aircraft_version code=0x0000000000000000
+event=aircraft_version major=19 minor=1 modify=10 debug=3
+event=phase_begin phase=camera_manager_init blocking=yes
+event=phase_result phase=camera_manager_init code=0x0000000000000000
+event=phase_begin phase=application_start blocking=yes
+event=phase_result phase=application_start code=0x0000000000000000
+event=phase_begin phase=camera_type psdk_port=1 blocking=yes
+event=camera_type psdk_port=1 camera_type=117 is_l3=yes code=0x0000000000000000
+event=summary camera_query_successes=1 l3_ports_found=1 interrupted=no
+event=stream phase=begin streams=points seconds=20 point_port=9101 video_port=9102 recording_start=explicit
+event=stream phase=recording_stop outcome=8 stop_ack=yes packets=0 malformed=0 cleanup_safe=yes sensor_state_verified=no
+event=stream phase=summary point_packets=0 video_bytes=0 point_dropped=0 slow_disconnects=0 send_errors=0
+event=phase_begin phase=camera_manager_deinit blocking=yes
+event=phase_result phase=camera_manager_deinit code=0x0000000000000000
+event=phase_begin phase=core_deinit blocking=yes
+event=phase_result phase=core_deinit code=0x0000000000000000
