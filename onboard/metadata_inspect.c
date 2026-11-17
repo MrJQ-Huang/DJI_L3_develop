@@ -40,6 +40,8 @@
 #include "l3p1_tcp_sink.h"
 #include "l3_stream.h"
 #include "l3_video_control.h"
+#include "l3_usb_padding.h"
+#include "l3_osal.h"
 #include "osal/osal.h"
 #include "osal/osal_fs.h"
 #if L3_USE_OFFICIAL_SOCKET
@@ -331,17 +333,19 @@ static bool sdk_result(const char *phase, T_DjiReturnCode result)
 static T_DjiReturnCode device_usb_init(T_DjiHalUsbBulkInfo info, T_DjiUsbBulkHandle *handle)
 {
     if (handle == NULL) return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
-    *handle = NULL;
+    T_DjiUsbBulkHandle aligned = NULL;
+    memcpy(handle, &aligned, sizeof(aligned));
     if (info.isUsbHost) return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT;
     if (info.channelInfo.interfaceNum != LINUX_USB_BULK1_INTERFACE_NUM &&
         info.channelInfo.interfaceNum != LINUX_USB_BULK2_INTERFACE_NUM &&
         info.channelInfo.interfaceNum != LINUX_USB_BULK3_INTERFACE_NUM)
         return DJI_ERROR_SYSTEM_MODULE_CODE_INVALID_PARAMETER;
-    T_DjiReturnCode result = HalUsbBulk_Init(info, handle);
+    T_DjiReturnCode result = HalUsbBulk_Init(info, &aligned);
     /* Vendor Init can allocate before an endpoint-open failure. Do not pass the
      * partially initialized opaque handle onward; process exit reclaims it.
      */
-    if (result != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) *handle = NULL;
+    if (result != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) aligned = NULL;
+    memcpy(handle, &aligned, sizeof(aligned));
     return result;
 }
 
@@ -365,12 +369,17 @@ static T_DjiReturnCode device_usb_read(T_DjiUsbBulkHandle handle, uint8_t *data,
 
 static int prepare_environment(void)
 {
+#if L3_FIX_MOP_USB_PADDING
+    puts("event=platform usb_copy_fix=pinned_3_18_arm64 source_allocations=unchanged");
+#else
+    puts("event=platform usb_copy_fix=off");
+#endif
     T_DjiOsalHandler osal = {
-        .TaskCreate = Osal_TaskCreate, .TaskDestroy = Osal_TaskDestroy,
-        .TaskSleepMs = Osal_TaskSleepMs, .MutexCreate = Osal_MutexCreate,
+        .TaskCreate = L3Osal_TaskCreate, .TaskDestroy = L3Osal_TaskDestroy,
+        .TaskSleepMs = Osal_TaskSleepMs, .MutexCreate = L3Osal_MutexCreate,
         .MutexDestroy = Osal_MutexDestroy, .MutexLock = Osal_MutexLock,
-        .MutexUnlock = Osal_MutexUnlock, .SemaphoreCreate = Osal_SemaphoreCreate,
-        .SemaphoreDestroy = Osal_SemaphoreDestroy, .SemaphoreWait = Osal_SemaphoreWait,
+        .MutexUnlock = Osal_MutexUnlock, .SemaphoreCreate = L3Osal_SemaphoreCreate,
+        .SemaphoreDestroy = L3Osal_SemaphoreDestroy, .SemaphoreWait = Osal_SemaphoreWait,
         .SemaphoreTimedWait = Osal_SemaphoreTimedWait, .SemaphorePost = Osal_SemaphorePost,
         .Malloc = Osal_Malloc, .Free = Osal_Free, .GetRandomNum = Osal_GetRandomNum,
         .GetTimeMs = Osal_GetTimeMs, .GetTimeUs = Osal_GetTimeUs
@@ -1361,6 +1370,7 @@ done:
         free(point_sink);
     }
     erase(&info, sizeof(info));
+    printf("event=sdk_usb_padding corrections=%" PRIu64 "\n", l3_usb_padding_corrections());
     pthread_mutex_lock(&sdk_log_mutex);
     if (sdk_log_fd >= 0) {
         fsync(sdk_log_fd);

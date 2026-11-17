@@ -12,6 +12,10 @@ target_link_libraries(l3_video_relay PRIVATE l3_stream Threads::Threads)
 target_compile_options(l3_video_relay PRIVATE -Wall -Wextra -Werror)
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(test_usb_padding tests/test_usb_padding.c l3_usb_padding.c)
+    target_include_directories(test_usb_padding PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_options(test_usb_padding PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    add_test(NAME usb_padding COMMAND test_usb_padding)
     add_executable(test_l3_stream tests/test_l3_stream.c)
     target_link_libraries(test_l3_stream PRIVATE l3_stream Threads::Threads)
     target_compile_options(test_l3_stream PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -26,6 +30,7 @@ endif()
 # Standalone target: NEVER add_subdirectory() the official comprehensive sample.
 # Configure/build only; this project has no run/install/DPK or post-build actions.
 set(PSDK_ROOT "" CACHE PATH "Official, unmodified DJI Payload-SDK 3.18.0 root")
+option(L3_FIX_MOP_USB_PADDING "Fix the pinned ARM64 SDK USB-copy length in a separate build archive" ON)
 option(L3_ENABLE_POINT_RECORDING_PROBE
     "Enable point-recording test ONLY after the SDK MOP memory error has a verified fix" OFF)
 option(L3_USE_OFFICIAL_SOCKET
@@ -41,7 +46,28 @@ set(PSDK_LIBRARY "${PSDK_ROOT}/psdk_lib/lib/aarch64-linux-gnu-gcc/libpayloadsdk.
 if(NOT EXISTS "${PSDK_LIBRARY}")
     message(FATAL_ERROR "Official aarch64-linux-gnu-gcc/libpayloadsdk.a missing")
 endif()
+if(L3_FIX_MOP_USB_PADDING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    if(BUILD_TESTING)
+        add_test(NAME sdk_patch_structure COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_psdk_usb_patch.py")
+    endif()
+    set(PSDK_FIXED_LIBRARY "${CMAKE_CURRENT_BINARY_DIR}/libpayloadsdk_l3_usb_fixed.a")
+    add_custom_command(OUTPUT "${PSDK_FIXED_LIBRARY}"
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/patch_psdk_usb_padding.py"
+                --input "${PSDK_LIBRARY}" --output "${PSDK_FIXED_LIBRARY}" --ar "${CMAKE_AR}"
+        DEPENDS "${PSDK_LIBRARY}" "${CMAKE_CURRENT_SOURCE_DIR}/patch_psdk_usb_padding.py"
+        VERBATIM)
+    add_custom_target(l3_fixed_psdk DEPENDS "${PSDK_FIXED_LIBRARY}")
+    set(PSDK_LIBRARY "${PSDK_FIXED_LIBRARY}")
+endif()
 if(BUILD_TESTING)
+    add_executable(test_osal tests/test_osal.c l3_osal.c)
+    target_include_directories(test_osal PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${PSDK_ROOT}/psdk_lib/include" "${PSDK_PLATFORM}/common")
+    target_compile_options(test_osal PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    target_link_libraries(test_osal PRIVATE Threads::Threads)
+    add_test(NAME osal_lifecycle COMMAND test_osal)
+    set_tests_properties(osal_lifecycle PROPERTIES TIMEOUT 5)
     add_executable(test_pointcloud_reader l3_pointcloud_psdk.c tests/test_pointcloud_reader.c)
     target_include_directories(test_pointcloud_reader PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PSDK_ROOT}/psdk_lib/include")
     target_compile_options(test_pointcloud_reader PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -86,6 +112,8 @@ add_executable(l3_metadata_inspect
     ${L3_SOCKET_SOURCE}
     l3_rgb_probe.c
     l3_video_control.c
+    l3_usb_padding.c
+    l3_osal.c
     l3_point_probe_controller.c
     l3_pointcloud_psdk.c
     l3p1_tcp_sink.c
@@ -101,9 +129,13 @@ target_include_directories(l3_metadata_inspect PRIVATE
 target_compile_features(l3_metadata_inspect PRIVATE c_std_11)
 target_compile_definitions(l3_metadata_inspect PRIVATE _GNU_SOURCE SYSTEM_ARCH_LINUX PLATFORM_ARCH_aarch64=1)
 target_compile_definitions(l3_metadata_inspect PRIVATE
+    L3_FIX_MOP_USB_PADDING=$<BOOL:${L3_FIX_MOP_USB_PADDING}>
     L3_ENABLE_POINT_RECORDING_PROBE=$<BOOL:${L3_ENABLE_POINT_RECORDING_PROBE}>
     L3_USE_OFFICIAL_SOCKET=$<BOOL:${L3_USE_OFFICIAL_SOCKET}>)
 target_compile_options(l3_metadata_inspect PRIVATE -Wall -Wextra)
 target_link_libraries(l3_metadata_inspect PRIVATE l3_stream "${PSDK_LIBRARY}" Threads::Threads m dl)
+if(L3_FIX_MOP_USB_PADDING)
+    add_dependencies(l3_metadata_inspect l3_fixed_psdk)
+endif()
 # Do not enable LIBUSB_INSTALLED: this target uses Manifold's existing functionFS
 # device endpoints. No USB host claiming, sysctl, networking setup, or chmod.

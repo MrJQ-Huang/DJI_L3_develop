@@ -105,7 +105,7 @@ class StreamReceiver:
                            video_disconnects=0, point_disconnects=0,
                            video_connected=False, point_connected=False,
                            video_bytes=0, video_frames=0, point_packets=0,
-                           points_received=0, decode_errors=0, point_errors=0,
+                           points_received=0, decode_errors=0, video_corrupt_frames=0, point_errors=0,
                            connection_errors=0, video_superseded=0, point_superseded=0,
                            video_error="", point_error="")
 
@@ -283,9 +283,20 @@ class StreamReceiver:
             raise ValueError("invalid H.264 stream") from error
 
     def _decode(self, codec, packet) -> None:
-        for decoded in codec.decode(packet):
+        try:
+            frames = codec.decode(packet)
+        except self._av.error.InvalidDataError:
+            # An incomplete source access unit must not discard a healthy TCP
+            # session and the entire decoder. L3 may supply IDR only at startup.
+            with self._lock:
+                self._stats["decode_errors"] += 1
+            return
+        for decoded in frames:
             if getattr(decoded, "is_corrupt", False):
-                raise ValueError("corrupt decoded frame")
+                with self._lock:
+                    self._stats["decode_errors"] += 1
+                    self._stats["video_corrupt_frames"] += 1
+                continue
             if (decoded.width <= 0 or decoded.height <= 0 or decoded.width > 8192 or
                     decoded.height > 8192 or decoded.width * decoded.height > MAX_PIXELS):
                 raise ValueError("decoded image exceeds size limit")

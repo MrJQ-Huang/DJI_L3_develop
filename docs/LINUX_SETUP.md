@@ -156,9 +156,9 @@ bash scripts/start_l3_preview_4g.sh \
   --host MANIFOLD_TAILNET_IP --seconds 300
 ```
 
-替换私有地址，必要时传`--identity KEY_PATH`、`--ssh-host SSH_ALIAS`。当前机载部署默认`/open_app/workspaces/dji/l3-dev/hd-preview-20261117`，可用`--remote-root`覆盖。只接收不显示加`--no-display`。如需核对本轮已确认的点云画面源，可加`--expected-source 14`；不匹配会拒绝启动，不会自动切源。预览最多300秒，停止按钮/关窗请求结束Liveview，SDK阻塞仍依赖机载外部超时。
+替换私有地址，必要时传`--identity KEY_PATH`、`--ssh-host SSH_ALIAS`。当前机载部署默认`/open_app/workspaces/dji/l3-dev/repair-20261117`，可用`--remote-root`覆盖。只接收不显示加`--no-display`。如需核对本轮已确认的点云画面源，可加`--expected-source 14`；不匹配会拒绝启动，不会自动切源。预览最多300秒，停止按钮/关窗请求结束Liveview，SDK阻塞仍依赖机载外部超时。连接中断后等待旧SDK正常退出，再用剩余时间重新订阅启动IDR；坏帧只丢弃该帧。末帧停更超过3秒时命令以失败结束，不能用历史收到过画面当作实时成功。
 
-窗口显示实际源、切换按钮、原始分辨率、接收Mbps和解码fps。**切换按钮已连接PSDK，但当前L3/PSDK实测拒绝切换命令（`0x00000021000000e0`），尚未实现软件切换成功。** 当前源14的二维点云画面不能当作XYZ。高清带宽与实测边界见[开发方案第9节](REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#9-原始高清普通视频窗口与切换按钮2026-11-17)。旧`--rviz`和码率参数不再属于此启动入口。
+窗口显示实际源、切换按钮、原始分辨率、接收Mbps和解码fps。**切换按钮已连接PSDK，但SDK本地功能检查返回`0x00000021000000e0`，尚未实现软件切换成功。** 私有诊断越过这一检查后，命令返回参数错误且源仍14，没有将未成功方案加入默认构建。当前源14的二维点云画面不能当作XYZ。修正库构建、SDK剩余泄漏、高清带宽和实测边界见[开发方案第10节](REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#10-sdk越读退出与视频恢复修复2026-11-17)。旧`--rviz`和码率参数不再属于此启动入口。
 
 ### 历史ROS 2 / RViz2通路
 

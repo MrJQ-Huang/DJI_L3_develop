@@ -155,6 +155,21 @@ def wait_for(test, timeout=4):
 
 
 class StreamReceiverTest(unittest.TestCase):
+    def test_bad_access_unit_recovers_on_the_same_connection(self):
+        encoded = video([(0, 0, 230)] * 2)
+        invalid_slice = b"\x00\x00\x00\x01\x41\xff"
+        visible = Source([encoded + invalid_slice + encoded], fragment=13)
+        receiver = StreamReceiver("127.0.0.1", video_port=visible.port,
+                                  streams="video", io_timeout=0.5).start()
+        try:
+            wait_for(lambda: receiver.stats()["video_frames"] == 4)
+            self.assertEqual(receiver.stats()["video_connections"], 1)
+            self.assertGreaterEqual(receiver.stats()["decode_errors"], 1)
+            self.assertGreater(receiver.latest_video().image[:, :, 2].mean(), 200)
+        finally:
+            receiver.stop()
+            visible.close()
+
     def test_point_fields_and_raw_clock(self):
         frame = point_frame(parse_packet(points(17)))
         self.assertEqual(POINT_DTYPE.itemsize, 16)

@@ -44,7 +44,7 @@ class PreviewState:
             if event.get("success") == "yes" and str(current) == event.get("requested"):
                 self.message = "设备已确认画面源，等待新视频帧"
             elif event.get("code") == UNSUPPORTED:
-                self.message = "切换失败：当前设备 / PSDK 不支持此命令；仍显示实际选中的画面"
+                self.message = "切换失败：PSDK 对此设备未开放切源；仍显示实际选中的画面"
             else:
                 self.message = "切换未确认：" + event.get("code", "未知错误")
         elif current is None:
@@ -171,6 +171,12 @@ class PreviewApp:
         self.previous_bytes = self.previous_frames = 0
         self.shown = 0
         self.received_frames = 0
+        self.restarts = 0
+        self.recovering = False
+        self.active_source = None
+        self.restart_source = None
+        self.last_frame_ns = None
+        self.final_frame_age = None
         self.last_stats = {}
         self.closed = False
         self.root = None
@@ -204,6 +210,21 @@ class PreviewApp:
                                        streams="video", socks5=self.args.socks5, io_timeout=10).start()
         self.shown = self.previous_bytes = self.previous_frames = 0
 
+    def request_recovery(self, now, source=None):
+        if self.recovering or now - self.started >= self.args.seconds - 10:
+            return
+        # A new TCP decoder cannot join L3's P-only continuation: it needs the
+        # startup IDR. Stop this subscription and await full SDK cleanup before
+        # starting a fresh process. This never changes the encoder or camera mode.
+        self.recovering = True
+        self.restart_source = source if source is not None else self.active_source
+        self.receiver.stop()
+        self.received_frames += self.receiver.stats()["video_frames"]
+        self.receiver = None
+        self.session.send("stop")
+        with self.session.lock:
+            self.session.state.message = "视频连接中断，正在重新订阅原始高清流…"
+
     def switch(self):
         state = self.session.snapshot()
         if state.current in SOURCE_NAMES:
@@ -218,23 +239,26 @@ class PreviewApp:
             self.message_text.set(state.message)
             self.toggle.configure(text="切到可见光" if state.current == 14 else "切到点云画面",
                                   state="normal" if self.session.ready.is_set() and
-                                  state.current in SOURCE_NAMES and not state.pending else "disabled")
-        if self.session.ready.is_set() and self.receiver is None:
+                                  state.current in SOURCE_NAMES and not state.pending and not self.recovering else "disabled")
+        if self.session.ready.is_set() and self.receiver is None and not self.recovering:
             self.generation = state.generation
+            self.active_source = state.current
             self.new_receiver()
         if self.receiver is not None:
-            if state.generation != self.generation:
-                self.received_frames += self.receiver.stats()["video_frames"]
-                self.receiver.stop()
-                if self.root:
-                    self.canvas.itemconfigure(self.image_item, image="")
-                self.new_receiver()  # Fresh decoder; never show old-source cached frames.
-                self.generation = state.generation
+            if state.current in SOURCE_NAMES:
+                if self.active_source is None:
+                    self.active_source = state.current
+                elif state.current != self.active_source:
+                    if self.root:
+                        self.canvas.itemconfigure(self.image_item, image="")
+                    self.request_recovery(now, source=state.current)
+        if self.receiver is not None:
             video = self.receiver.latest_video()
             stats = self.receiver.stats()
             self.last_stats = stats
             if video is not None and video.sequence != self.shown:
                 self.shown = video.sequence
+                self.last_frame_ns = video.received_monotonic_ns
                 if self.root:
                     import cv2
                     height, width = video.image.shape[:2]
@@ -261,9 +285,25 @@ class PreviewApp:
                                   "mbps": round(mbps, 2), "fps": round(fps, 2), **stats}), flush=True)
                 self.previous_bytes, self.previous_frames = stats["video_bytes"], stats["video_frames"]
                 self.last_report = now
-        if now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending:
+            if stats["video_disconnects"] > 0 and not self.session.finished.is_set():
+                self.request_recovery(now)
+        if now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and not self.recovering:
             self.session.send("status")
             self.last_status = now
+        if self.session.finished.is_set() and self.recovering and self.session.returncode == 0:
+            remaining = self.args.seconds - int(now - self.started)
+            if remaining >= 5:
+                self.session.close()
+                session_args = argparse.Namespace(**vars(self.args))
+                session_args.seconds = remaining
+                if self.restart_source is not None:
+                    session_args.expected_source = self.restart_source
+                self.session = PreviewSession(session_args)
+                self.session.start()
+                self.restarts += 1
+                self.recovering = False
+                print(json.dumps({"event": "hd_restart", "attempt": self.restarts,
+                                  "remaining_seconds": remaining, "reencode": False}), flush=True)
         if self.session.finished.is_set() or now - self.started > self.args.seconds + 40:
             self.close()
 
@@ -271,6 +311,7 @@ class PreviewApp:
         if self.closed:
             return
         self.closed = True
+        self.final_frame_age = (time.monotonic_ns() - self.last_frame_ns) / 1e9 if self.last_frame_ns is not None else None
         if self.receiver:
             self.receiver.stop()
             self.last_stats = self.receiver.stats()
@@ -303,9 +344,12 @@ class PreviewApp:
         finally:
             self.close()
         print(json.dumps({"event": "hd_complete", "onboard_rc": self.session.returncode,
+                          "restarts": self.restarts,
+                          "last_frame_age_seconds": round(self.final_frame_age, 2) if self.final_frame_age is not None else None,
                           "received_frames": self.received_frames, "last_stats": self.last_stats,
                           "logs": str(self.session.log_dir)}), flush=True)
-        return 0 if self.session.returncode == 0 and self.received_frames > 0 else 1
+        fresh = self.final_frame_age is not None and self.final_frame_age < 3
+        return 0 if self.session.returncode == 0 and self.received_frames > 0 and fresh else 1
 
 
 def arguments(argv=None):
@@ -314,7 +358,7 @@ def arguments(argv=None):
     parser.add_argument("--ssh-host", default="l3-manifold")
     parser.add_argument("--identity")
     parser.add_argument("--socks5", default="127.0.0.1:1055", help="Explicit SOCKS5 host:port; empty for direct TCP")
-    parser.add_argument("--remote-root", default="/open_app/workspaces/dji/l3-dev/hd-preview-20261117")
+    parser.add_argument("--remote-root", default="/open_app/workspaces/dji/l3-dev/repair-20261117")
     parser.add_argument("--remote-config", default="/open_app/workspaces/dji/l3-dev/private/psdk.conf")
     parser.add_argument("--seconds", type=int, default=300, help="Bounded preview duration, 1..300 seconds")
     parser.add_argument("--mount", type=int, default=1)
