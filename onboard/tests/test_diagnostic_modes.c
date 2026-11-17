@@ -35,6 +35,18 @@ T_DjiReturnCode DjiCameraManager_GetCurrentCameraStatus(E_DjiMountPosition mount
     return metadata_error ? DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT : DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
 
+T_DjiReturnCode DjiCameraManager_SetStreamSource(E_DjiMountPosition mount, E_DjiCameraManagerStreamSource source)
+{
+    (void)mount; (void)source;
+    assert(!"no source writes in diagnostic/read-only tests");
+    return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT;
+}
+T_DjiReturnCode DjiLiveview_RequestIntraframeFrameData(E_DjiLiveViewCameraPosition mount, E_DjiLiveViewCameraSource source)
+{
+    (void)mount; (void)source;
+    assert(!"no source changes in diagnostic/read-only tests");
+    return DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT;
+}
 T_DjiReturnCode DjiLiveview_Init(void) { ++liveview_inits; return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS; }
 T_DjiReturnCode DjiLiveview_Deinit(void) { ++liveview_deinits; return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS; }
 T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount, L3RgbProbeSink sink, void *user)
@@ -73,15 +85,15 @@ int main(void)
     assert(liveview_inits == 1 && video_starts == 1 && video_stops == 1 && liveview_deinits == 1);
     assert(point_runs == 0);
 
-    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_POINTS, -1) == 0);
+    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_POINTS, -1, false) == 0);
     assert(point_runs == 1);
     assert(liveview_inits == 1 && video_starts == 1 && video_stops == 1 && liveview_deinits == 1);
-    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_BOTH, -1) == 0);
+    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_BOTH, -1, false) == 0);
     assert(point_runs == 2);
     assert(liveview_inits == 2 && video_starts == 2 && video_stops == 2 && liveview_deinits == 2);
 
     /* Video forwarding must never invoke the point-recording controller. */
-    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, -1) == 0);
+    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, -1, false) == 0);
     assert(point_runs == 2);
     assert(liveview_inits == 3 && video_starts == 3 && video_stops == 3 && liveview_deinits == 3);
 
@@ -110,14 +122,14 @@ int main(void)
     assert(!check_video_source(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, DJI_CAMERA_MANAGER_SOURCE_WIDE_CAM));
     wrong_camera = false;
 
-    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, 14) == 1);
+    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, 14, false) == 1);
     assert(point_runs == 2 && liveview_inits == 3 && video_starts == 3);
 
     fail_video_start = true;
     assert(run_sdk_diagnostic(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, true) == 1);
     assert(point_runs == 2);
     assert(liveview_inits == 4 && video_starts == 4 && video_stops == 4 && liveview_deinits == 4);
-    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, -1) == 1);
+    assert(run_live_stream(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, "127.0.0.1", 0, 0, L3_STREAM_VIDEO, -1, false) == 1);
     assert(point_runs == 2 && video_stops == 5 && liveview_deinits == 5);
     stop_requested = 1;
     assert(run_sdk_diagnostic((E_DjiMountPosition)0, 1, false) == 1);

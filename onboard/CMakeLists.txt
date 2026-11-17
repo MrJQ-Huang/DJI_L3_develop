@@ -64,8 +64,14 @@ if(BUILD_TESTING)
     # explicit stubs in the test. No vendor binary or hardware I/O is linked.
     target_link_options(test_diagnostic_modes PRIVATE -Wl,--gc-sections)
     target_link_libraries(test_diagnostic_modes PRIVATE l3_stream Threads::Threads)
+    target_sources(test_diagnostic_modes PRIVATE l3_video_control.c)
     add_test(NAME diagnostic_modes COMMAND test_diagnostic_modes)
     set_tests_properties(diagnostic_modes PROPERTIES TIMEOUT 10)
+    add_executable(test_video_control tests/test_video_control.c l3_video_control.c)
+    target_include_directories(test_video_control PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PSDK_ROOT}/psdk_lib/include")
+    target_compile_options(test_video_control PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    add_test(NAME video_control COMMAND test_video_control)
+    set_tests_properties(video_control PROPERTIES TIMEOUT 10)
 endif()
 set(L3_SOCKET_SOURCE metadata_socket.c)
 if(L3_USE_OFFICIAL_SOCKET)
@@ -79,6 +85,7 @@ add_executable(l3_metadata_inspect
     metadata_inspect.c
     ${L3_SOCKET_SOURCE}
     l3_rgb_probe.c
+    l3_video_control.c
     l3_point_probe_controller.c
     l3_pointcloud_psdk.c
     l3p1_tcp_sink.c

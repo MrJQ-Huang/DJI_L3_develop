@@ -146,6 +146,18 @@ static void test_dual_stream_and_join(void)
     nal(stream, 0x65, 0x80, 2);
     read_exact(joined, received, sizeof(received));
     assert(memcmp(received, expected, sizeof(expected)) == 0);
+    l3_stream_reset_video(stream);
+    wait_clients(stream, 2, 0);
+    assert(recv(joined, &byte, 1, 0) == 0);
+    close(joined);
+    joined = connect_to(stats.video_port, false);
+    wait_clients(stream, 2, 1);
+    nal(stream, 0x65, 0x80, 2); /* No stale SPS/PPS after a source reset. */
+    empty.fd = joined;
+    assert(poll(&empty, 1, 40) == 0);
+    bootstrap(stream);
+    read_exact(joined, received, sizeof(received));
+    assert(memcmp(received, expected, sizeof(expected)) == 0);
     close(joined); close(points[0]); close(points[1]);
     wait_clients(stream, 0, 0); /* Idle closed clients free their slots too. */
     assert(!l3_stream_publish_points(stream, packet, sizeof(packet) - 1));
@@ -166,7 +178,7 @@ static void test_slow_video_client(void)
     bootstrap(stream);
     uint8_t data[4096];
     read_exact(fast, data, 20);
-    for (size_t i = 0; i < 80; ++i) {
+    for (size_t i = 0; i < 1200; ++i) {
         nal(stream, 0x41, 0x80, sizeof(data) - 5);
         read_exact(fast, data, sizeof(data));
     }

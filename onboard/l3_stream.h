@@ -27,6 +27,7 @@ typedef struct {
     uint32_t video_clients;
     uint64_t point_packets;
     uint64_t video_bytes;
+    uint64_t video_sps, video_pps, video_idr, video_first_idr;
     uint64_t point_dropped;
     uint64_t slow_disconnects;
     uint64_t send_errors;
@@ -46,6 +47,10 @@ L3Stream *l3_stream_start(const L3StreamConfig *config);
 bool l3_stream_publish_h264(L3Stream *stream, const uint8_t *data, size_t size);
 bool l3_stream_publish_points(L3Stream *stream, const uint8_t *packet, size_t size);
 void l3_stream_stats(L3Stream *stream, L3StreamStats *stats);
+
+/* After a confirmed camera-source change, end old decoder sessions and wait
+ * for fresh SPS/PPS + IDR. Does not change/re-encode any H.264 payload. */
+void l3_stream_reset_video(L3Stream *stream);
 
 /* Stop source callbacks before stop. Stop closes connections and joins all
  * workers; the stream pointer is invalid afterwards. */

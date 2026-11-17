@@ -222,7 +222,7 @@ static void accept_client(L3Stream *stream, size_t kind)
     int fd = accept(stream->listeners[kind], NULL, NULL);
     if (fd < 0) return;
     if (nonblocking(fd) != 0) { close(fd); return; }
-    int send_buffer = 16 * 1024;
+    int send_buffer = kind == 1 ? 1024 * 1024 : 16 * 1024;
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer));
     int one = 1;
     (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
@@ -367,9 +367,13 @@ static bool emit_nal(L3Stream *stream, const uint8_t *nal, size_t size)
 {
     if (size <= 4) return true;
     unsigned int type = nal[4] & 31U;
+    if (type == 7) ++stream->stats.video_sps;
+    if (type == 8) ++stream->stats.video_pps;
+    if (type == 5) ++stream->stats.video_idr;
     if (type == 7 && !cache_parameter(&stream->sps, &stream->sps_size, nal, size)) return false;
     if (type == 8 && !cache_parameter(&stream->pps, &stream->pps_size, nal, size)) return false;
     bool first_idr = type == 5 && size > 5 && (nal[5] & 0x80U) != 0;
+    if (first_idr) ++stream->stats.video_first_idr;
     for (size_t i = 2; i < CLIENTS; ++i) {
         Client *client = &stream->clients[i];
         if (!client->active || atomic_load(&client->stopping)) continue;
@@ -434,6 +438,23 @@ void l3_stream_stats(L3Stream *stream, L3StreamStats *stats)
         if (i < 2) ++stats->point_clients;
         else ++stats->video_clients;
     }
+    pthread_mutex_unlock(&stream->lock);
+}
+
+void l3_stream_reset_video(L3Stream *stream)
+{
+    if (stream == NULL) return;
+    pthread_mutex_lock(&stream->lock);
+    for (size_t i = 2; i < CLIENTS; ++i) {
+        Client *client = &stream->clients[i];
+        if (!client->active) continue;
+        atomic_store(&client->stopping, true);
+        clear_pending(client);
+        pthread_cond_signal(&client->available);
+    }
+    stream->have_start = false;
+    stream->nal_size = stream->zeros = 0;
+    stream->sps_size = stream->pps_size = 0;
     pthread_mutex_unlock(&stream->lock);
 }
 

@@ -147,9 +147,22 @@ adb -d shell am start -n \
 
 本次已授权的遥控器覆盖安装保留了权限；新设备或全新安装需要检查SDK所需权限与联网注册，不能把Windows注册成功当成另一设备也已注册。
 
-## C. ROS 2 / RViz2
+## C. 当前二维视频预览（不使用RViz）
 
-2026-11-17最新二维点云预览入口：用户本阶段仅用妙算3，真实点云相机画面已通过机载4G→本机ROS Image/RViz实测；不是XYZ。运行`bash scripts/start_l3_preview_4g.sh --host MANIFOLD_TAILNET_IP --expected-source 14 --seconds 60 --rviz`，替换私有地址。此入口自动启动有界机载视频转发，不开启录制；`--expected-source`只读检查，不切源。详细边界、部署和实测见[开发方案第8节](REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#8-二维点云预览经妙算和4g回传2026-11-17)。下方PointCloud2配置继续用于真实XYZ后续工作。
+最新用户要求：二维点云画面与可见光都按普通视频显示，使用妙算3/PSDK，不用MSDK，不再为本预览启动ROS/RViz。原始H.264直通，不调整源分辨率/帧率/码率；本地窗口可按窗口大小缩放显示，网络收到的仍是原图。需要`.venv`中的PyAV/OpenCV及系统`python3-tk`；本机已具备。两端沿用已授权的私有Tailnet/SSH。
+
+```bash
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --seconds 300
+```
+
+替换私有地址，必要时传`--identity KEY_PATH`、`--ssh-host SSH_ALIAS`。当前机载部署默认`/open_app/workspaces/dji/l3-dev/hd-preview-20261117`，可用`--remote-root`覆盖。只接收不显示加`--no-display`。如需核对本轮已确认的点云画面源，可加`--expected-source 14`；不匹配会拒绝启动，不会自动切源。预览最多300秒，停止按钮/关窗请求结束Liveview，SDK阻塞仍依赖机载外部超时。
+
+窗口显示实际源、切换按钮、原始分辨率、接收Mbps和解码fps。**切换按钮已连接PSDK，但当前L3/PSDK实测拒绝切换命令（`0x00000021000000e0`），尚未实现软件切换成功。** 当前源14的二维点云画面不能当作XYZ。高清带宽与实测边界见[开发方案第9节](REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#9-原始高清普通视频窗口与切换按钮2026-11-17)。旧`--rviz`和码率参数不再属于此启动入口。
+
+### 历史ROS 2 / RViz2通路
+
+以下桥接保留给此前XYZ目标；本轮普通预览不调用它们。
 
 2026-11-17本机实际环境为Ubuntu22.04/ROS 2 Humble，已经安装，无需重装。新增`pc_viewer/l3_ros_bridge.py`直接构造Image/PointCloud2，复用本机`.venv`，不依赖`cv_bridge`；已通过ROS发布订阅和4G合成点流RViz验证，真实XYZ仍待SDK修复。默认仅点云启动：
 

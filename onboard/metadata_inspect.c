@@ -1,8 +1,8 @@
 /*
  * M400/L3 explicit metadata, H.264, or exclusive short point-recording probe.
  * Point recording/Stop require their own explicit command and operator gate.
- * Optional expected-source check reads camera metadata; no source writes,
- * gimbal or flight-control API.
+ * Optional video-control-stdin permits explicit preview-source changes only.
+ * No gimbal or flight-control API.
  * SDK initialization requires an explicit mode, never the default.
  * Build only with the standalone CMakeLists.txt in this directory.
  *
@@ -39,6 +39,7 @@
 #include "l3_point_probe_controller.h"
 #include "l3p1_tcp_sink.h"
 #include "l3_stream.h"
+#include "l3_video_control.h"
 #include "osal/osal.h"
 #include "osal/osal_fs.h"
 #if L3_USE_OFFICIAL_SOCKET
@@ -101,6 +102,7 @@ static void usage(void)
          "         --streams points|both|video --bind 127.0.0.1\n"
          "         --point-port 9101 --video-port 9102 --exclusive-test\n"
          "         [--expected-source ID (video-only; no source writes)]\n"
+         "         [--video-control-stdin (video-only; explicit source writes)]\n"
          "\n"
          "No arguments/--help: no configuration read or SDK initialization.\n"
          "--check-config: validate owner-only regular 0600 file; no SDK calls.\n"
@@ -133,6 +135,9 @@ static void usage(void)
          "and use the same SDK-fix build gate as --point-probe.\n"
          "--expected-source: optional CameraManager source ID, video-only. Reads\n"
          "the exact L3 range/current source and refuses a mismatch; no writes.\n"
+         "--video-control-stdin accepts status/visible/point/stop lines. EOF stops\n"
+         "the session. visible/point explicitly change preview source only,\n"
+         "with exact-L3/range/readback checks; no scan or recording commands.\n"
          "\n"
          "Config: UTF-8, unquoted KEY=VALUE; split at first '='; all required:\n"
          "APP_NAME APP_ID APP_KEY APP_LICENSE DEVELOPER_ACCOUNT BAUD_RATE\n"
@@ -947,9 +952,62 @@ static bool check_video_source(E_DjiMountPosition mount, unsigned int expected)
     return matched;
 }
 
+static void video_control_event(const char *action, int requested, L3VideoControlResult r)
+{
+    printf("event=video_control action=%s requested=%d previous=%d current=%d success=%s write_attempted=%s code=0x%016" PRIx64 "\n",
+           action, requested, r.previous_source, r.current_source,
+           r.confirmed ? "yes" : "no", r.write_attempted ? "yes" : "no", (uint64_t)r.code);
+}
+
+typedef struct { char line[32]; size_t used; bool discard; } VideoCommand;
+
+/* One bounded input read per iteration; never interpret stdin as shell or SDK
+ * packets. Source 7 is VISIBLE_CAM; 14 was advertised/visually verified on L3.
+ * These IDs must NOT be passed as Liveview source arguments. */
+static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3Stream *stream)
+{
+    struct pollfd fd = {.fd = STDIN_FILENO, .events = POLLIN};
+    if (poll(&fd, 1, 0) <= 0) return false;
+    char data[32];
+    ssize_t count = read(STDIN_FILENO, data, sizeof(data));
+    if (count == 0) return true;
+    if (count < 0) return errno != EINTR && errno != EAGAIN;
+    for (ssize_t i = 0; i < count; ++i) {
+        if (data[i] != '\n') {
+            if (data[i] < ' ' || data[i] > '~' || input->used == sizeof(input->line) - 1)
+                input->discard = true;
+            else if (!input->discard) input->line[input->used++] = data[i];
+            continue;
+        }
+        input->line[input->used] = '\0';
+        if (!input->discard && strcmp(input->line, "stop") == 0) return true;
+        if (!input->discard && strcmp(input->line, "status") == 0) {
+            video_control_event("status", -1, l3_video_source_read(mount));
+        } else if (!input->discard &&
+                   (strcmp(input->line, "visible") == 0 || strcmp(input->line, "point") == 0)) {
+            unsigned int source = strcmp(input->line, "visible") == 0 ? DJI_CAMERA_MANAGER_SOURCE_VISIBLE_CAM : 14;
+            L3VideoControlResult result = l3_video_source_set(mount, source);
+            /* A failed ACK can still leave the source changed or unknown. In
+             * that case invalidate the old decoder too, without claiming success. */
+            if (result.write_attempted && result.current_source != result.previous_source) {
+                l3_stream_reset_video(stream);
+                T_DjiReturnCode keyframe = DjiLiveview_RequestIntraframeFrameData(
+                    (E_DjiLiveViewCameraPosition)mount, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT);
+                sdk_result("video_control_keyframe", keyframe);
+            }
+            video_control_event("switch", (int)source, result);
+        } else {
+            puts("event=video_control action=invalid current=-1 success=no code=invalid_command");
+        }
+        input->used = 0;
+        input->discard = false;
+    }
+    return false;
+}
+
 static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
                            const char *bind_ip, unsigned int point_port, unsigned int video_port,
-                           L3StreamMode mode, int expected_source)
+                           L3StreamMode mode, int expected_source, bool video_control)
 {
     bool with_video = mode != L3_STREAM_POINTS;
     bool with_points = mode != L3_STREAM_VIDEO;
@@ -957,9 +1015,12 @@ static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
     if (context == NULL) return 1;
     atomic_init(&context->video_failed, false);
     L3StreamConfig network = { .bind_ip = bind_ip, .point_port = (uint16_t)point_port,
-                               .video_port = (uint16_t)video_port };
+                               .video_port = (uint16_t)video_port,
+                               .video_queue_bytes = mode == L3_STREAM_VIDEO ? 8U * 1024U * 1024U : 0,
+                               .send_timeout_ms = mode == L3_STREAM_VIDEO ? 3000 : 0 };
     context->stream = l3_stream_start(&network);
     if (context->stream == NULL) { free(context); return 1; }
+    if (video_control) puts("event=stream phase=video_listen encoding=source_h264 reencode=no");
     int status = 1;
     bool liveview_initialized = false, video_start_attempted = false;
     T_DjiReturnCode rc = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
@@ -969,6 +1030,24 @@ static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
         if (expected_source >= 0 && !check_video_source(mount, (unsigned int)expected_source)) {
             puts("event=video_source phase=check result=failed");
             goto finish;
+        }
+        if (video_control) {
+            /* L3's current encoder supplies its IDR at subscription startup;
+             * RequestIntraframe ACK did not produce another IDR in testing.
+             * Establish the real remote TCP client BEFORE starting Liveview. */
+            int64_t until = point_now_ms() + 10000;
+            bool connected = false;
+            while (!stop_requested && point_now_ms() < until) {
+                L3StreamStats waiting;
+                l3_stream_stats(context->stream, &waiting);
+                if (waiting.video_clients > 0) { connected = true; break; }
+                struct timespec delay = {.tv_nsec = 100000000};
+                nanosleep(&delay, NULL);
+            }
+            if (!connected) {
+                puts("event=stream phase=failed reason=no_video_client_before_subscription");
+                goto finish;
+            }
         }
         rc = DjiLiveview_Init();
         if (!sdk_result("stream_liveview_init", rc)) goto finish;
@@ -1005,18 +1084,34 @@ static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
         int64_t begin = point_now_ms();
         if (begin < 0) goto finish;
         int64_t deadline = begin + (int64_t)seconds * 1000, next_report = begin;
+        VideoCommand input = {0};
+        unsigned int previous_clients = 0;
+        if (video_control) video_control_event("status", -1, l3_video_source_read(mount));
         printf("event=stream phase=begin streams=video seconds=%u point_port=%u video_port=%u recording_start=no\n",
                seconds, point_port, video_port);
         while (!stop_requested) {
             int64_t now = point_now_ms();
             if (now < 0) goto finish;
             if (now >= deadline) { status = 0; break; }
+            if (video_control && poll_video_command(&input, mount, context->stream)) {
+                status = 0;
+                break;
+            }
             if (now >= next_report) {
                 L3StreamStats stats;
                 l3_stream_stats(context->stream, &stats);
+                if (stats.video_clients > previous_clients) {
+                    /* A remote viewer can join after the encoder's initial IDR.
+                     * Ask for a fresh keyframe without changing source/bitrate. */
+                    sdk_result("video_join_keyframe", DjiLiveview_RequestIntraframeFrameData(
+                        (E_DjiLiveViewCameraPosition)mount, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT));
+                }
+                previous_clients = stats.video_clients;
                 printf("event=stream phase=video_hold elapsed_ms=%" PRId64 " video_bytes=%" PRIu64
-                       " video_clients=%u send_errors=%" PRIu64 "\n",
-                       now - begin, stats.video_bytes, (unsigned int)stats.video_clients, stats.send_errors);
+                       " video_clients=%u send_errors=%" PRIu64
+                       " sps=%" PRIu64 " pps=%" PRIu64 " idr=%" PRIu64 " first_idr=%" PRIu64 "\n",
+                       now - begin, stats.video_bytes, (unsigned int)stats.video_clients, stats.send_errors,
+                       stats.video_sps, stats.video_pps, stats.video_idr, stats.video_first_idr);
                 next_report = now + 1000;
             }
             struct timespec pause = { .tv_sec = 0, .tv_nsec = 100L * 1000L * 1000L };
@@ -1054,6 +1149,7 @@ int main(int argc, char **argv)
     bool point_probe = false, stop_pointcloud = false, exclusive_test = false;
     bool stream = false, sdk_diagnostic = false, diagnostic_video = false;
     bool video_info = false;
+    bool video_control = false;
     int expected_source = -1;
     const char *streams = NULL;
     const char *bind_ip = "127.0.0.1";
@@ -1082,6 +1178,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--config") == 0 && config == NULL && i + 1 < argc) config = argv[++i];
         else if (strcmp(argv[i], "--inspect") == 0 && !inspect) inspect = true;
         else if (strcmp(argv[i], "--video-info") == 0 && !video_info) video_info = true;
+        else if (strcmp(argv[i], "--video-control-stdin") == 0 && !video_control) video_control = true;
         else if (strcmp(argv[i], "--expected-source") == 0 && expected_source < 0 && i + 1 < argc) {
             unsigned int value;
             if (!parse_number(argv[++i], 0U, 255U, &value)) return 2;
@@ -1127,6 +1224,7 @@ int main(int argc, char **argv)
                               (unsigned int)video_info;
     if (config == NULL || mode_count != 1U ||
         (expected_source >= 0 && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
+        (video_control && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
         ((rgb_probe || point_probe || stop_pointcloud || stream || diagnostic_video || video_info) && selected_mount == 0U) ||
         ((inspect || check_config) && selected_mount != 0U) ||
         (diagnostic_video && !sdk_diagnostic) ||
@@ -1237,7 +1335,7 @@ int main(int argc, char **argv)
         if (streams != NULL && strcmp(streams, "points") == 0) stream_mode = L3_STREAM_POINTS;
         else if (streams != NULL && strcmp(streams, "video") == 0) stream_mode = L3_STREAM_VIDEO;
         status = run_live_stream((E_DjiMountPosition)selected_mount,
-                                 probe_seconds, bind_ip, point_port, video_port, stream_mode, expected_source);
+                                 probe_seconds, bind_ip, point_port, video_port, stream_mode, expected_source, video_control);
     }
     if (stop_pointcloud && status == 0) {
         puts("event=point_probe phase=emergency_stop_begin start_attempted=no mop_initialized=no blocking=yes");

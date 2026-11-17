@@ -1,10 +1,14 @@
 # 本次开发 handoff
 
-2026-11-17 最新阶段调整：用户明确先回传 Pilot 2 中的**二维点云相机画面**，暂不处理存储，仅用妙算3，不使用 MSDK。已实机取得该画面：精确 L3 / PSDK 3.18.0 / 固件17.2.0.59，CameraManager 可用源 `[7,14]`、当前源14，Liveview `DEFAULT=0` 实际输出1920×1080彩色点云预览。它经妙算和机载4G在本机成功解码，**不是XYZ / PointCloud2**。原流约15Mbps，出现慢客户端断开；新增妙算 FFmpeg→`l3_video_relay`，默认960×540、10fps、800kbps，60秒测试解码546帧，观察到约53秒画面更新，解码错误0、转发器慢客户端断开0；结束阶段有一次send error，不能写成全程零错误。媒体不落盘，诊断日志和验证快照仅在本地忽略目录。详见[二维预览实施记录](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#8-二维点云预览经妙算和4g回传2026-11-17)。
+2026-11-17 最新阶段：用户明确把二维点云相机画面作为普通视频显示，增加可见光/点云画面切换按钮，高清回传且不压低码率；只用妙算3/PSDK，不用MSDK，不接RViz。本机入口为`bash scripts/start_l3_preview_4g.sh --host MANIFOLD_TAILNET_IP --seconds 300`，已改为普通Tk视频窗口；机载目录`/open_app/workspaces/dji/l3-dev/hd-preview-20261117`。FFmpeg转码/缩放/降帧率/800kbps配置已从该入口移除，直接转发相机原始H.264；`--rviz`不再支持。详见[当前高清预览记录](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#9-原始高清普通视频窗口与切换按钮2026-11-17)。
 
-新增启动入口 `scripts/start_l3_preview_4g.sh --host MANIFOLD_TAILNET_IP --expected-source 14 --seconds 60`，可加`--rviz`。`--expected-source`只是读取/核对当前源，不切源；不匹配即拒绝启动预览。PSDK `SetStreamSource(7)`本轮返回`0x00000021000000e0`，恢复请求也返回同码，后续启动检查仍确认当前源14；实验切源代码未保留在最终实现。当前只验证一条选中预览流，自动切源和可见光/点云两路同时输出均未打通。所有测试均地面，无电机、云台、飞控、扫描/录制操作；原SDK内存错误没有修复，XYZ录制门槛仍OFF。
+**已验证但尚未完成稳定验收：** 精确L3 / PSDK3.18.0 / L3固件17.2.0.59，CameraManager范围`[7,14]`、当前14，Liveview DEFAULT输出1920×1080二维彩色点云图像，普通窗口已实机目视确认。45秒原始订阅收到83,560,796字节，约14.86Mbps；当前4G/DERP路径本机接收约4–6Mbps，实际只解码118帧/8,311,570字节后停更，机载慢客户端断开1次、本机解码错误1次，不能称为流畅高清实时通过。不能通过压低码率掩盖此结果。
 
-最终45秒机载4G→ROS/RViz实测：本机解码424帧、发布236条真实点云预览Image，解码/ROS发布/连接错误均0，机载转发器1个连接、慢客户端断开0、send error=0；RViz画面已目视确认。较少的ROS发布次数来自最新帧策略，不宣称硬件同步或恒定10fps屏幕刷新。PSDK、FFmpeg、转发器及本机接收均正常退出，未留常驻采集。
+切换按钮已接受检查的PSDK写接口，但视频运行中`SetStreamSource(7)`仍返回`0x00000021000000e0`（UNSUPPORTED_COMMAND），读回保持14；UI显示失败并保留实际源，**未打通软件切换或双路同时输出**。源7是头文件VISIBLE_CAM，源14由此设备实测确认，均不是Liveview源枚举。另一次有界Liveview子源1实验8秒0字节，没有保留或盲试其他源。
+
+本轮还定位L3只在订阅开始出现IDR，后续关键帧请求ACK成功但不产生新IDR；因此先建立接收TCP再订阅。已修复初次源状态读回误触发解码器重连。断线后的IDR恢复仍有实机限制，窗口停更时需停止后重开会话。最后45秒测试在Liveview/CameraManager/Core清理ACK成功后仍报`corrupted double-linked list`及进程abort；本机SSH最终返回255，不得写成正常退出或SDK稳定性已通过。原先SDK内存错误门槛继续OFF，不启XYZ录制。真实媒体/截图/日志均仅保存在私有忽略目录；无电机、飞控、云台、扫描/录制操作。
+
+历史低码率实验（已被当前高清入口取代）：960×540/10fps/800kbps的60秒测试曾解码546帧；45秒ROS/RViz实验解码424帧、发布236条Image，未发布XYZ。不能把这些结果套用于当前原码流模式。下方更早阶段的XYZ/ROS要求保留为历史记录。
 
 2026-11-17 点云优先实施：用户已批准上一轮方案，包括SDK诊断、ROS/RViz以及修复验证后的20秒点云和5分钟双流采集，优先激光点云；无需重复询问这些权限。新增`--stream --streams points`（不启Liveview，门槛仍OFF）和本机`l3_ros_bridge.py`/`l3.rviz`/`start_l3_rviz.sh`（默认只接点云）。14项妙算原生CTest、新增6项ROS测试通过；实际机载4G合成点流在本机RViz运行32秒、接收/发布319包，无点包/发布错误；不是真实XYZ。纯Core无相机/无录制ASan对照在本项目socket和官方阻塞socket下分别14.300/14.649秒复现相同28→4096越读。两轮均已结束，未启动点云录制；详见[故障报告](docs/TEST_REPORT_2026-11-16.md#2026-11-17无相机无录制的最小对照)。新机载目录`/open_app/workspaces/dji/l3-dev/points-20261117`。下一步依赖可验证的SDK修复或官方适用方案，不能绕开该结果直接录制。
 
