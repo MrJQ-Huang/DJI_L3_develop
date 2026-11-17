@@ -1,5 +1,7 @@
 # 妙算3采集适配器（开发阶段）
 
+2026-11-17点云优先更新：`--stream --streams points`只初始化点云路径，不调用Liveview；默认`both`保持双流。两模式均会启动录制，因此仍受默认关闭的SDK修复门槛限制。新增纯Core诊断在本项目与官方socket收发下都复现28→4096越读，见[最新对照结果](../docs/TEST_REPORT_2026-11-16.md#2026-11-17无相机无录制的最小对照)。本机ROS/RViz与4G合成点流已通过，真实XYZ未取得。
+
 2026-11-17：双流核心已接入。`l3_stream.c/.h`是SDK无关的双TCP分发器，`metadata_inspect.c --stream`将Liveview和持续点云读取接入该核心；`--stream`明确会启动点云录制，仍由默认关闭的`L3_ENABLE_POINT_RECORDING_PROBE`门槛拒绝。原PSDK内存错误未有已验证修复，当前未启动真实采集。完整构建、离线集成测试和电脑接收命令见[开发方案](../docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#7-已实现代码运行与实测边界)。下方11月16日描述保留历史背景，适配器不再只是未集成源文件。
 
 最新状态见[首次测试记录](../docs/TEST_REPORT_2026-11-16.md)：8 秒 L3 DEFAULT H.264 已解码确认为 1920×1080 可见光预览，但发现 PSDK 内部越界读取，尚未通过持续实时回传或真实点云验收。当前构建默认关闭会启动录制的点云入口；不要在未验证修复的 SDK 上打开它。本轮实际点云录制未执行。
@@ -25,6 +27,10 @@ cmake --build build/metadata -j2
 build/metadata/l3_metadata_inspect --help
 build/metadata/l3_metadata_inspect --config /private/path/psdk.conf --check-config
 ```
+
+`--sdk-diagnostic --seconds 60`仅做Core/ApplicationStart、飞机元数据和有界等待，不调用CameraManager、Liveview或录制。增加`--diagnostic-video --mount 1`才初始化视频并计数后丢弃数据。两者均需新建0700私有工作目录，外部`timeout --signal=TERM --kill-after=3s 90s`限制SDK阻塞。诊断会实际初始化SDK，不能把构建或`--help`通过当作诊断通过。
+
+`-DL3_USE_OFFICIAL_SOCKET=ON`供故障对照：使用匹配SDK的官方阻塞socket收发，仅在该编译单元将`system()`重定向到拒绝函数，避免执行其全局sysctl写入；事件明确标注`sysctl_writes=blocked`。这不是SDK修复或正式部署必选项。Liveview适配已改用3.18的`DjiLiveview_StartStream/StopStream`，不声称接口迁移解决MOP内存错误。
 
 `--rgb-probe --mount 1 --seconds 8` 会在精确确认 L3 后尝试 DEFAULT H.264 订阅，在内存中收集有限数据，Stop/排空后保存 `l3-rgb.private.h264`，不调用录制和相机源写入。该模式仅作 SDK 故障复现和短样本验证；当前 SDK 已有运行期崩溃证据，不当作稳定采集器。
 

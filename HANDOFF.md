@@ -1,5 +1,9 @@
 # 本次开发 handoff
 
+2026-11-17 点云优先实施：用户已批准上一轮方案，包括SDK诊断、ROS/RViz以及修复验证后的20秒点云和5分钟双流采集，优先激光点云；无需重复询问这些权限。新增`--stream --streams points`（不启Liveview，门槛仍OFF）和本机`l3_ros_bridge.py`/`l3.rviz`/`start_l3_rviz.sh`（默认只接点云）。14项妙算原生CTest、新增6项ROS测试通过；实际机载4G合成点流在本机RViz运行32秒、接收/发布319包，无点包/发布错误；不是真实XYZ。纯Core无相机/无录制ASan对照在本项目socket和官方阻塞socket下分别14.300/14.649秒复现相同28→4096越读。两轮均已结束，未启动点云录制；详见[故障报告](docs/TEST_REPORT_2026-11-16.md#2026-11-17无相机无录制的最小对照)。新机载目录`/open_app/workspaces/dji/l3-dev/points-20261117`。下一步依赖可验证的SDK修复或官方适用方案，不能绕开该结果直接录制。
+
+2026-11-17 版本对照补充：为排除降级规避，已用同一最小`--sdk-diagnostic`在妙算原生编译并实机复现，3.14.0、3.17.0、3.18.0 三版 ARM64 官方库均在约5秒等待后于`mop_flow_ctrl_thread → DjiMopChannel_UsbBulkSendData`发生相同28字节→4096越读。3.14.0 已是官方开始支持 L3 的版本，因此当前没有支持 L3 且可规避该问题的降级版本。构建目录在妙算`/open_app/workspaces/dji/l3-dev/points-314test`、`points-317test`；lib 的 SHA256 见[故障报告](docs/TEST_REPORT_2026-11-16.md#2026-11-173140--3170--3180-arm64-版本对照)。真实点云录制门槛继续关闭，下一步只能是取得 DJI 修复库或官方规避方案。
+
 2026-11-17 验收范围更新：用户明确只验收“真实L3可见光与激光点云经4G送至本机，并在本机RViz同时显示”。保留已实现的双客户端能力，但不要求两台物理电脑验收；现有PSDK新链路尚无ROS发布桥接，需补`Image`和`PointCloud2`，沿用本机Humble环境。真实取流仍先处理已复现SDK内存错误，当前未开启新的录制。
 
 2026-11-17 MVP开发接续：已新增SDK无关双TCP分发、增量H.264/点云接收、有效合成双客户端集成测试，并接入`metadata_inspect.c --stream`。持续控制器有独立Stop，短时探测保留20秒限制；`--stream`仍在读取配置和初始化SDK之前受默认关闭的修复门槛限制，当前未运行真实采集。妙算原生开发目录为`/open_app/workspaces/dji/l3-dev/mvp-20261117`，SDK库仍为原已复现越读的hash。最新运行说明及验证边界只维护在[开发方案](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#7-已实现代码运行与实测边界)。

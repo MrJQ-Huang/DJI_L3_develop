@@ -8,6 +8,37 @@ L3 的 PSDK `DEFAULT` 视频已取得 H.264，并解码确认是当前室内场�
 
 PSDK 3.18.0 运行中发现 SDK 内部越界读取，可能导致进程异常退出；实际点云录制没有开始。点云程序、独立停止控制器和回传适配器已准备并编译，不能将模拟测试通过写成取得真实 XYZ。
 
+## 2026-11-17：无相机、无录制的最小对照
+
+用户批准诊断和修复验证后的有界采集，并要求优先点云。本轮在同一妙算上原生编译新增`--sdk-diagnostic --seconds 60`，只注册平台、初始化Core、查询飞机元数据、ApplicationStart、等待及清理；没有调用CameraManager、Liveview、应用MOP读写或任何录制接口。两次运行顺序执行，各有90秒外部期限，SDK库与下表既有SHA256一致。
+
+| 平台socket适配 | 进程观测时长 | 结果 |
+| --- | --- | --- |
+| 本项目非阻塞socket | 14.300秒 | SIGABRT；ASan heap-buffer-overflow，28字节分配上READ 4096 |
+| 官方阻塞socket收发实现 | 14.649秒 | 相同错误尺寸、分配链和`DjiMopChannel_UsbBulkSendData`调用链 |
+
+两轮均已完成CoreInit、飞机查询和ApplicationStart，进入等待约5秒后异常；未到正常DeInit。官方socket对照仅屏蔽该源码中的两次`system()`全局网络缓冲修改，其余socket收发逻辑保持官方实现，USB仍使用现有参数保护包装。故这不是未经修改的完整官方示例，但结果表明替换本项目socket收发不能修复当前错误。
+
+两轮分配链均含`Osal_Malloc → mop_flow_ctrl_clear_buffer → mop_flow_ctrl_thread`。本次把必要触发条件缩小到SDK基础运行，排除了本项目相机订阅、点云读取/录制、TCP分发和ROS作为必要条件；闭源内部原因和修复仍需DJI确认。没有已验证的公开API可关闭该内部任务。保持真实点云录制门槛关闭，不将不崩溃的短运行或屏蔽ASan当作修复。
+
+源文件及Release、两种ASan构建位于妙算`/open_app/workspaces/dji/l3-dev/points-20261117`；14项原生CTest通过，默认仅点云业务入口已实测在读取配置和初始化SDK前拒绝。两次诊断已结束，没有启动点云录制。原始日志保留在各自0700私有运行目录，不上传。
+
+独立的软件/网络验证也已完成：本机新增6项ROS转换与实际发布订阅测试通过；在妙算运行不链接SDK的合成回放器，经机载4G/Tailscale到本机RViz，32.016秒内接收并发布319个合成点包，点包和ROS发布错误均为0，视频连接为0。另一个本机ROS订阅者检查了50条消息的XYZ、RGB和接收时间，RViz实际渲染合成点。该记录证明点流转发与显示可工作，**不等于已经取得真实L3点云**。
+
+## 2026-11-17：3.14.0 / 3.17.0 / 3.18.0 ARM64 版本对照
+
+为判断是否可用降级规避，同一最小`--sdk-diagnostic --seconds 60`（只初始化Core、查询元数据、ApplicationStart、等待，不启动相机/视频/点云录制）分别在以下官方 ARM64 库上原生编译并运行：
+
+| PSDK | ARM64 lib SHA256 | 结果 |
+| --- | --- | --- |
+| 3.14.0 | `d792c896f007f496d3755ce3d1dd6c45730c57bf7c9166f59d1f65c2815525a3` | 相同`mop_flow_ctrl_thread → DjiMopChannel_UsbBulkSendData`，28字节分配上READ 4096 |
+| 3.17.0 | `274a5782632dd3bbbe4acd011196173a56db149f9e7b215041163051df84365d` | 同上 |
+| 3.18.0 | `5725cc72824d915410be59e98cb31b4d269510c4615c1033da8d5fffbffdb5e7` | 同上（既有记录） |
+
+3.14.0 是官方开始支持 Zenmuse L3 的版本，因此当前没有“支持 L3 且避免该越界”的可用降级版本。3.17.0 x86_64 的比较此前已发现相同分支，本次在 ARM64 上实际复现，进一步把结论从代码比较升级为实机证据。3.14.0 的构建因 Liveview 接口名不同（`DjiLiveview_StartH264Stream`）为本次最小诊断加入了不调用视频路径的占位，不影响 Core/MOP 诊断结论。
+
+结论不变：这是 SDK 内部的 `DjiMopChannel_UsbBulkSendData` 内存越界，发生在 `DjiCore_Init` 内部 WebSocketOverMOP 流控线程，应用层与 HAL/OSAL 适配无法关闭或修复。真实点云录制入口继续默认关闭，等待 DJI 提供适用于妙算3 / M400 / L3 的 ARM64 修复库或官方规避方案。
+
 ## 环境与初始化
 
 | 项目 | 结果 |

@@ -1,7 +1,8 @@
 """Receive L3P1 point packets and raw H.264 over two independent TCP streams.
 
 No DJI SDK or aircraft commands run here. Source timestamp/XYZ values remain
-unconverted; received_monotonic_ns is this computer's receive/decode time.
+unconverted; received_monotonic_ns and received_system_ns are this computer's
+receive/decode times, not sensor acquisition timestamps.
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ class VideoFrame:
     image: np.ndarray  # Read-only uint8 BGR; copy before changing it.
     sequence: int      # Local decoded-frame count, not a sensor sequence.
     received_monotonic_ns: int
+    received_system_ns: int
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class PointFrame:
     crc_header_raw: int
     crc_rest_raw: int
     received_monotonic_ns: int
+    received_system_ns: int
 
     @property
     def xyz(self) -> np.ndarray:
@@ -57,7 +60,7 @@ def point_frame(packet: Packet) -> PointFrame:
     if not all(np.isfinite(points[name]).all() for name in ("x", "y", "z")):
         raise ValueError("non-finite XYZ coordinate")
     return PointFrame(points, packet.sequence, packet.source_timestamp_raw,
-                      packet.crc_header_raw, packet.crc_rest_raw, time.monotonic_ns())
+                      packet.crc_header_raw, packet.crc_rest_raw, time.monotonic_ns(), time.time_ns())
 
 
 class StreamReceiver:
@@ -292,7 +295,8 @@ class StreamReceiver:
                 if self._video is not None and self._video.sequence > self._video_observed:
                     self._stats["video_superseded"] += 1
                 self._stats["video_frames"] += 1
-                self._video = VideoFrame(image, self._stats["video_frames"], time.monotonic_ns())
+                self._video = VideoFrame(image, self._stats["video_frames"],
+                                         time.monotonic_ns(), time.time_ns())
 
 
 def main() -> int:

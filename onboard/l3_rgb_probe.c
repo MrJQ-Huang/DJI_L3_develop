@@ -104,8 +104,8 @@ T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
     active_user = user;
     pthread_mutex_unlock(&callback_lock);
 
-    rc = DjiLiveview_StartH264Stream(camera, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT,
-                                    receive_stream);
+    rc = DjiLiveview_StartStream(camera, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT,
+                                 receive_stream);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         /* Do not assume an SDK error excludes partial startup. The caller
          * must still call stop to request cleanup of this attempted stream. */
@@ -126,7 +126,7 @@ T_DjiReturnCode l3_rgb_probe_stop(void)
     disable_delivery();
     T_DjiReturnCode rc = DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
     if (stop_needed) {
-        rc = DjiLiveview_StopH264Stream(position, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT);
+        rc = DjiLiveview_StopStream(position, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT);
         if (rc == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
             stop_needed = false;
         }

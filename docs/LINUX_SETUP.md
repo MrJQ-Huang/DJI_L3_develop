@@ -147,7 +147,16 @@ adb -d shell am start -n \
 
 本次已授权的遥控器覆盖安装保留了权限；新设备或全新安装需要检查SDK所需权限与联网注册，不能把Windows注册成功当成另一设备也已注册。
 
-## C. 真实XYZ已拿到后，再安装 ROS 2 / RViz2
+## C. ROS 2 / RViz2
+
+2026-11-17本机实际环境为Ubuntu22.04/ROS 2 Humble，已经安装，无需重装。新增`pc_viewer/l3_ros_bridge.py`直接构造Image/PointCloud2，复用本机`.venv`，不依赖`cv_bridge`；已通过ROS发布订阅和4G合成点流RViz验证，真实XYZ仍待SDK修复。默认仅点云启动：
+
+```bash
+bash scripts/start_l3_rviz.sh --host MANIFOLD_TAILNET_IP \
+  --socks5 127.0.0.1:1055 --raw-coordinates --seconds 60
+```
+
+替换实际私有地址；`--raw-coordinates`明确表示源坐标诊断显示，不能视为米制空间验收。双流加`--streams both`，无界面加`--no-rviz`。脚本只启动本机接收与显示，不开启机载录制。以下Jazzy命令仅供新Ubuntu24.04环境参考，不用于当前本机。
 
 Ubuntu24.04对应ROS2 Jazzy。按[官方Ubuntu安装说明](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html)配置当前ROS软件源与签名，再执行：
 
@@ -158,11 +167,11 @@ source /opt/ros/jazzy/setup.bash
 ros2 run rviz2 rviz2
 ```
 
-不要在尚无ROS源时盲目安装；不要将安装成功等同于已具备DJI点云驱动。本仓库目前没有ROS桥接节点。
+不要在尚无ROS源时盲目安装；不要将安装成功或合成ROS消息通过等同于已取得真实DJI点云。
 
-后续桥接发布图像 `sensor_msgs/msg/Image`，点云 `sensor_msgs/msg/PointCloud2`。必须标明坐标轴/单位、frame_id、点字段和时间来源；无标定和硬件同步时不能假装RGB/点云已经对齐。
+桥接发布图像 `sensor_msgs/msg/Image`、点云 `sensor_msgs/msg/PointCloud2`。必须标明坐标轴/单位、frame_id、点字段和时间来源；无标定和硬件同步时不能假装RGB/点云已经对齐。
 
-ROS2预编译Python包需要匹配系统解释器。独立图像接收器的普通venv与未来ROS节点环境分开；ROS节点优先系统Python+apt依赖，或基于系统Python的 `--system-site-packages` venv。不要用conda解释器承载apt的ROS包，也不要用pip随意升级NumPy破坏cv_bridge ABI。
+ROS2预编译Python包需要匹配系统解释器。当前使用系统Python3.10创建的`.venv`，source Humble后加载rclpy/sensor_msgs，直接序列化消息；不要用conda解释器替换，也不要为本桥接额外安装可能与NumPy ABI不匹配的cv_bridge。
 
 ## D. 秒算3：单独管理机载环境
 

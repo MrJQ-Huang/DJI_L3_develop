@@ -1,0 +1,55 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 35; 35; 35
+    Fixed Frame: l3_raw
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/PointCloud2
+      Enabled: true
+      Name: L3 points (source axes; raw unless scale verified)
+      Topic:
+        Value: /l3/points
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 1
+      Style: Points
+      Size (Pixels): 3
+      Alpha: 1
+      Position Transformer: XYZ
+      Color Transformer: RGB8
+      Decay Time: 0.5
+      Selectable: true
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: L3 visible light (when --streams both)
+      Topic:
+        Value: /l3/camera/image_raw
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 1
+      Normalize Range: false
+      Value: true
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 10
+      Focal Point: {X: 0, Y: 0, Z: 0}
+      Pitch: 0.5
+      Yaw: 0.8
+Window Geometry:
+  Width: 1280
+  Height: 800
