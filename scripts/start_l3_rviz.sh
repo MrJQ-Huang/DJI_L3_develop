@@ -5,7 +5,13 @@ task_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 bridge_args=()
 show_rviz=1
 fixed_frame=l3_raw
+rviz_config="$task_root/pc_viewer/l3.rviz"
+previous_argument=
 for argument in "$@"; do
+    if [[ "$argument" == --streams=video || ( "$previous_argument" == --streams && "$argument" == video ) ]]; then
+        rviz_config="$task_root/pc_viewer/l3_preview.rviz"
+        fixed_frame=l3_camera_optical
+    fi
     case "$argument" in
         --no-rviz) show_rviz=0 ;;
         --help|-h) show_rviz=0; bridge_args+=("$argument") ;;
@@ -13,6 +19,7 @@ for argument in "$@"; do
             fixed_frame=l3_local; bridge_args+=("$argument") ;;
         *) bridge_args+=("$argument") ;;
     esac
+    previous_argument=$argument
 done
 if [[ ! -f /opt/ros/humble/setup.bash ]]; then
     echo 'ROS 2 Humble is required at /opt/ros/humble.' >&2
@@ -45,7 +52,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 "$task_root/.venv/bin/python" "$task_root/pc_viewer/l3_ros_bridge.py" "${bridge_args[@]}" &
 bridge_pid=$!
-rviz2 -d "$task_root/pc_viewer/l3.rviz" -f "$fixed_frame" &
+rviz2 -d "$rviz_config" -f "$fixed_frame" &
 rviz_pid=$!
 # Closing RViz or ending the bounded bridge test stops the other local process.
 set +e

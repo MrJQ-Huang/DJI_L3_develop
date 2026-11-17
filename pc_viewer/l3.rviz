@@ -29,7 +29,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/Image
       Enabled: true
-      Name: L3 visible light (when --streams both)
+      Name: L3 video preview
       Topic:
         Value: /l3/camera/image_raw
         Reliability Policy: Best Effort

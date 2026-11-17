@@ -309,6 +309,8 @@ def main() -> int:
     parser.add_argument("--io-timeout", type=float, default=10,
                         help="TCP/initial-keyframe wait in seconds (default: 10)")
     parser.add_argument("--no-display", action="store_true")
+    parser.add_argument("--video-title", default="L3 Liveview",
+                        help="Window label only; does not select or verify the camera source")
     parser.add_argument("--seconds", type=float, default=0, help="0: until Ctrl+C/ESC")
     parser.add_argument("--max-frames", type=int, default=0)
     args = parser.parse_args()
@@ -340,11 +342,11 @@ def main() -> int:
             if display:
                 video = receiver.latest_video()
                 if video is not None and video.sequence != shown:
-                    cv2.imshow("L3 visible light", video.image)
+                    cv2.imshow(args.video_title, video.image)
                     shown = video.sequence
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
-                if shown and cv2.getWindowProperty("L3 visible light", cv2.WND_PROP_VISIBLE) < 1:
+                if shown and cv2.getWindowProperty(args.video_title, cv2.WND_PROP_VISIBLE) < 1:
                     break
             if now - last_report >= 1:
                 print(json.dumps({"event": "stats", **stats}), flush=True)

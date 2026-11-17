@@ -149,6 +149,8 @@ adb -d shell am start -n \
 
 ## C. ROS 2 / RViz2
 
+2026-11-17最新二维点云预览入口：用户本阶段仅用妙算3，真实点云相机画面已通过机载4G→本机ROS Image/RViz实测；不是XYZ。运行`bash scripts/start_l3_preview_4g.sh --host MANIFOLD_TAILNET_IP --expected-source 14 --seconds 60 --rviz`，替换私有地址。此入口自动启动有界机载视频转发，不开启录制；`--expected-source`只读检查，不切源。详细边界、部署和实测见[开发方案第8节](REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#8-二维点云预览经妙算和4g回传2026-11-17)。下方PointCloud2配置继续用于真实XYZ后续工作。
+
 2026-11-17本机实际环境为Ubuntu22.04/ROS 2 Humble，已经安装，无需重装。新增`pc_viewer/l3_ros_bridge.py`直接构造Image/PointCloud2，复用本机`.venv`，不依赖`cv_bridge`；已通过ROS发布订阅和4G合成点流RViz验证，真实XYZ仍待SDK修复。默认仅点云启动：
 
 ```bash

@@ -1,5 +1,7 @@
 # 妙算3采集适配器（开发阶段）
 
+2026-11-17二维点云预览更新：`--stream --streams video` 已实机通过 Liveview `DEFAULT` 获取当前选中的 L3 点云相机画面，不开启点云录制。新增`--video-info --mount 1`查询实际视频源；`--expected-source 14`仅核对本设备已验证的点云源，不执行切源。`scripts/run_l3_preview_onboard.sh`在妙算内部解码/压缩，默认960×540、10fps、800kbps，经SDK无关`l3_video_relay`输出H.264至9102。无需修改原有接收协议或Android。用户本阶段要求仅用妙算，不使用MSDK。构建和本机启动见[实施记录](../docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#8-二维点云预览经妙算和4g回传2026-11-17)。当前只输出一条选中预览，自动切源及两路并行未通过；下方真实XYZ方案保留。
+
 2026-11-17点云优先更新：`--stream --streams points`只初始化点云路径，不调用Liveview；默认`both`保持双流。两模式均会启动录制，因此仍受默认关闭的SDK修复门槛限制。新增纯Core诊断在本项目与官方socket收发下都复现28→4096越读，见[最新对照结果](../docs/TEST_REPORT_2026-11-16.md#2026-11-17无相机无录制的最小对照)。本机ROS/RViz与4G合成点流已通过，真实XYZ未取得。
 
 2026-11-17：双流核心已接入。`l3_stream.c/.h`是SDK无关的双TCP分发器，`metadata_inspect.c --stream`将Liveview和持续点云读取接入该核心；`--stream`明确会启动点云录制，仍由默认关闭的`L3_ENABLE_POINT_RECORDING_PROBE`门槛拒绝。原PSDK内存错误未有已验证修复，当前未启动真实采集。完整构建、离线集成测试和电脑接收命令见[开发方案](../docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#7-已实现代码运行与实测边界)。下方11月16日描述保留历史背景，适配器不再只是未集成源文件。

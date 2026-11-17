@@ -228,3 +228,73 @@ Tailnet接收命令（先替换实际妙算Tailnet地址，并完成两端授权
 [system-features]: https://developer.dji.com/doc/payload-sdk-tutorial/cn/manifold-quick-start/manifold-platform-capabilities/system-features.html
 [capabilities]: https://developer.dji.com/doc/payload-sdk-tutorial/cn/manifold-quick-start/psdk-capabilities-overview.html
 [l3-faq]: https://enterprise.dji.com/zenmuse-l3/faq
+
+## 8. 二维点云预览经妙算和4G回传（2026-11-17）
+
+用户本阶段将优先目标调整为回传 Pilot 2 中的二维点云相机画面，先不处理存储，明确只用妙算3、不用MSDK。它通过 `sensor_msgs/msg/Image` 显示，不是包含XYZ的 `PointCloud2`，不替代此前真实点云验收。
+
+### 已验证的源端与传输事实
+
+- 当前 M400 / L3 / PSDK 3.18.0 的相机类型精确为 L3，CameraManager `GetStreamSourceRange` 返回 `[7,14]`，`GetCurrentCameraStatus` 返回源14。
+- `DjiLiveview_StartStream(..., DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT, ...)` 取得了1920×1080真实二维彩色点云画面。本机实际解码并目视确认；`DEFAULT`不能固定标为“可见光”。CameraManager源ID与Liveview源枚举是不同参数域，不将14直接强转传入Liveview。
+- 原始25秒订阅产生47,005,975字节，约15.0Mbps；本机只解码32帧，转发器因慢客户端断开1次。4G路径需压缩预览码流。
+- 妙算FFmpeg以960×540、10fps、800kbps目标参数重编码后，60秒订阅产生5,342,336字节压缩码流。本机收到4,904,625字节、解码546帧、解码错误0，实际观察268次最新帧更新，覆盖52.98秒，最大观察更新间隔约1.02秒。10fps是编码配置，不是承诺每秒10次屏幕刷新。
+- 该轮转发器接受1个真实视频客户端，慢客户端断开0；结束阶段send error=1。本机统计还包含发布服务启动前/停止后Tailscale Serve连接重试，不能把这些全部解释为中途断流，也不能宣称全程零网络错误。
+- `SetStreamSource(7)`有界试验及恢复请求均返回`0x00000021000000e0`。后续源14检查及点云画面再次通过，未观察到源被改变。最终代码不保留切源写操作，仅核对当前源；不能承诺PSDK自动切换或两路同时输出。
+
+### 当前链路
+
+```text
+L3 当前二维点云画面
+  → 妙算 PSDK Liveview DEFAULT
+  → 本地 TCP 19102（原始H.264，不出机载网络）
+  → FFmpeg 内存解码/缩放/重编码
+  → FIFO → l3_video_relay → 127.0.0.1:9102
+  → 已配置的 Tailscale Serve / 机载4G
+  → 本机 H.264 解码 → OpenCV 或 ROS Image / RViz
+```
+
+原始媒体不写文件。运行日志在两端私有目录；本轮少量画面验证快照仅留本地`.validation/`，不提交。没有启动视频或点云录制、扫描、电机、飞控或云台动作。PSDK已知内存错误没有被修复，当前短时视频实测不能当作长期SDK稳定性或真实XYZ验收，`L3_ENABLE_POINT_RECORDING_PROBE`仍OFF。
+
+### 构建与启动
+
+妙算保留现有PSDK及本地凭据，在独立目录构建本仓库`onboard`，不要启动综合示例：
+
+```bash
+cmake -S onboard -B build \
+  -DPSDK_ROOT=/path/to/Payload-SDK-3.18.0 \
+  -DL3_ENABLE_POINT_RECORDING_PROBE=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j4
+(cd build && ctest --output-on-failure)
+```
+
+本轮部署目录为妙算`/open_app/workspaces/dji/l3-dev/preview-20261117`。需要系统`ffmpeg`含`libx264`，本机已有，无需新增安装或修改系统配置。机载脚本默认只绑定loopback，继续使用已配置的Tailscale Serve9102；不新增公网监听、路由或服务自启动。
+
+本机启动（替换本地私有地址；SSH别名和凭据保持本地配置）：
+
+```bash
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --expected-source 14 --seconds 60
+
+# 同一路画面在现有ROS 2 Humble / RViz中显示：
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --expected-source 14 --seconds 60 --rviz
+```
+
+`--expected-source 14`校验的是本轮设备已确认的源，检查失败会拒绝启动预览，**不会写入14或开启录制**。更换设备、固件或当前源后先用`--video-info`读取，不能按编号盲试。省略该参数允许回传当前源，但不预先认定图像内容。`--no-display`用于只收流验证。SSH只管理进程，业务图像走所指定的Tailnet/SOCKS连接。
+
+妙算单独启动可调分辨率/码率，所有进程有有限运行时间和外部超时：
+
+```bash
+bash scripts/run_l3_preview_onboard.sh \
+  --bin-dir /absolute/path/build --config /private/psdk.conf \
+  --expected-source 14 --seconds 60 --width 960 --fps 10 --bitrate-kbps 800
+```
+
+正常结束会停Liveview、编码器和转发器。强制终止或本机窗口提前关闭时，远端可能继续到本次有界超时结束；不承诺关闭本机窗口就是机载立即停流。不能同时启动另一份占用相同SDK/端口的采集程序。
+
+### 验证覆盖
+
+原JPEG协议离线测试通过；H.264/点包接收与双客户端集成测试9项通过；新增stdin视频转发的真实合成H.264解码、断开重连、空闲取消测试通过；ROS桥接6项通过。妙算原生14项CTest通过，包含视频模式不调用点云录制控制器、视频源范围长度越界拒绝、精确L3检查及清理。`test_diagnostic_modes`修复了旧布尔参数仍被当作枚举使用的测试问题，明确分别验证`POINTS`、`VIDEO`、`BOTH`。
+
+最终`--expected-source 14 --rviz --seconds 45`实测：当前源14核对通过；本机收到3,773,089字节、解码424帧、发布236条Image，解码错误/ROS发布错误/连接错误均0，ROS未发布任何PointCloud2。转发器输出3,968,951字节，1个连接，慢客户端断开0、send error=0。RViz界面已目视确认显示二维彩色点云；其三维主视图为空属于当前Image模式，不表示XYZ接通。发布器、FFmpeg、转发器、本机接收返回码均0。原始截图和日志仅本地保存，不随代码上传。
