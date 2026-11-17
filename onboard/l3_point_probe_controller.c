@@ -138,6 +138,17 @@ static bool receive_sink(const uint8_t *packet, uint32_t size, void *opaque)
     return result;
 }
 
+static bool reader_should_stop(void *opaque)
+{
+    L3PointProbeController *c = opaque;
+    pthread_mutex_lock(&c->lock);
+    struct timespec now;
+    if (!now_locked(c, &now) || !before(now, c->deadline)) request_locked(c);
+    bool stop = c->report.stop_requested;
+    pthread_mutex_unlock(&c->lock);
+    return stop;
+}
+
 static void *reader_worker(void *opaque)
 {
     L3PointProbeController *c = opaque;
@@ -161,8 +172,10 @@ static void *reader_worker(void *opaque)
     pthread_mutex_unlock(&c->lock);
 
     L3PointCloudReadReport reader_report = {0};
-    L3PointCloudResult result = l3_pointcloud_psdk_read(c->config.mount, 60, 30,
-                                                       receive_sink, c, &reader_report);
+    L3PointCloudResult result = c->config.continuous
+        ? l3_pointcloud_psdk_read_until(c->config.mount, reader_should_stop,
+                                       receive_sink, c, &reader_report)
+        : l3_pointcloud_psdk_read(c->config.mount, 60, 30, receive_sink, c, &reader_report);
 
     pthread_mutex_lock(&c->lock);
     c->report.reader_report = reader_report;
@@ -293,7 +306,7 @@ L3PointProbeOutcome l3_point_probe_run(const L3PointProbeConfig *config,
     *retained = NULL;
     report->cleanup_safe = true;
     if (config == NULL || config->sink == NULL || !config->confirmed_no_existing_recording ||
-        config->duration_ms == 0 || config->duration_ms > 20000 ||
+        config->duration_ms == 0 || config->duration_ms > (config->continuous ? 300000U : 20000U) ||
         (config->mount != DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1 &&
          config->mount != DJI_MOUNT_POSITION_PAYLOAD_PORT_NO2 &&
          config->mount != DJI_MOUNT_POSITION_PAYLOAD_PORT_NO3)) return L3_POINT_PROBE_INVALID_ARGUMENT;

@@ -91,6 +91,24 @@ static bool count_packet(const uint8_t *packet, uint32_t size, void *user)
     return strcmp(scenario, "sink-failure") != 0;
 }
 
+L3PointCloudResult l3_pointcloud_psdk_read_until(E_DjiMountPosition mount,
+                                               L3PointCloudStopRequested should_stop,
+                                               L3PointCloudPacketSink sink, void *user,
+                                               L3PointCloudReadReport *report)
+{
+    CHECK(mount == DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1);
+    atomic_fetch_add(&readers, 1);
+    static const uint8_t synthetic[] = "synthetic-controller-test";
+    memset(report, 0, sizeof(*report));
+    while (!should_stop(user)) {
+        ++report->receive_attempts;
+        if (!sink(synthetic, sizeof(synthetic), user)) break;
+        ++report->packets_delivered;
+        sleep_ms(1);
+    }
+    return L3_POINTCLOUD_SINK_STOPPED;
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -99,7 +117,8 @@ int main(int argc, char **argv)
     L3PointProbeConfig config = {
         .mount = DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1,
         .duration_ms = strcmp(scenario, "normal") == 0 || strcmp(scenario, "reader-block") == 0 ||
-                       strcmp(scenario, "sink-failure") == 0 ? 3200 : 50,
+                       strcmp(scenario, "sink-failure") == 0 || strcmp(scenario, "continuous") == 0 ? 3200 : 50,
+        .continuous = strcmp(scenario, "continuous") == 0,
         .confirmed_no_existing_recording = true,
         .sink = count_packet,
         .cancel_flag = &cancelled,
@@ -120,7 +139,11 @@ int main(int argc, char **argv)
     } else {
         CHECK(atomic_load(&starts) == 1 && report.start_attempted && report.start_finished);
         CHECK(report.stop_attempts == atomic_load(&stops));
-        if (strcmp(scenario, "normal") == 0) {
+        if (strcmp(scenario, "continuous") == 0) {
+            CHECK(outcome == L3_POINT_PROBE_OK && report.cleanup_safe && retained == NULL);
+            CHECK(report.reader_report.packets_delivered > 30 && atomic_load(&stops) == 1);
+            CHECK(elapsed_ms >= 3150 && elapsed_ms < 4000);
+        } else if (strcmp(scenario, "normal") == 0) {
             CHECK(outcome == L3_POINT_PROBE_OK && report.cleanup_safe && retained == NULL);
             CHECK(atomic_load(&delivered) == 1 && atomic_load(&stops) == 1);
         } else if (strcmp(scenario, "reader-block") == 0) {

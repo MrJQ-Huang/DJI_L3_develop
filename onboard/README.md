@@ -1,5 +1,7 @@
 # 妙算3采集适配器（开发阶段）
 
+2026-11-17：双流核心已接入。`l3_stream.c/.h`是SDK无关的双TCP分发器，`metadata_inspect.c --stream`将Liveview和持续点云读取接入该核心；`--stream`明确会启动点云录制，仍由默认关闭的`L3_ENABLE_POINT_RECORDING_PROBE`门槛拒绝。原PSDK内存错误未有已验证修复，当前未启动真实采集。完整构建、离线集成测试和电脑接收命令见[开发方案](../docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#7-已实现代码运行与实测边界)。下方11月16日描述保留历史背景，适配器不再只是未集成源文件。
+
 最新状态见[首次测试记录](../docs/TEST_REPORT_2026-11-16.md)：8 秒 L3 DEFAULT H.264 已解码确认为 1920×1080 可见光预览，但发现 PSDK 内部越界读取，尚未通过持续实时回传或真实点云验收。当前构建默认关闭会启动录制的点云入口；不要在未验证修复的 SDK 上打开它。本轮实际点云录制未执行。
 
 这里包含专用元数据程序和待集成的采集适配器，尚不是可直接安装的 DPK。2026-11-16，`metadata_inspect.c` 已在妙算原生链接完整 PSDK 并正常运行，确认 M400 与 PSDK 负载位置 1 的 L3；未启动视频、点云或录制。`l3_pointcloud_psdk.c`、`l3_rgb_probe.c` 和 Linux TCP sink 则仅通过 GCC 9.4.0 的 `-std=c11 -Wall -Wextra -Werror -c` 原生编译，尚未集成为采集程序；点云及视频适配器使用官方 PSDK 3.18.0 头文件，并增加 `-pthread`。当前实机妙算接在 M400 的 E2，SSH 为 `192.168.42.130`，详见[本轮连接检查](../docs/MANIFOLD_DIRECT_LINK.md#2026-11-16-实机连接与编译检查)和[总体开发方案](../docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md)。

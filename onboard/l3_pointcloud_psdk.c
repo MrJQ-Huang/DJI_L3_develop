@@ -51,9 +51,10 @@ static bool is_complete_packet(const uint8_t *buffer, uint32_t length)
            data_bytes == length - prefix;
 }
 
-L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
+static L3PointCloudResult read_packets(E_DjiMountPosition mount,
                                          uint32_t max_receive_attempts,
                                          uint32_t max_packets,
+                                         L3PointCloudStopRequested stop_requested,
                                          L3PointCloudPacketSink sink,
                                          void *user_context,
                                          L3PointCloudReadReport *report)
@@ -67,7 +68,7 @@ L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
     const E_DjiChannelAddress address = address_for_mount(mount);
     E_DjiCameraType camera_type = DJI_CAMERA_TYPE_UNKNOWN;
     if (address == DJI_CHANNEL_ADDRESS_UNKNOWN || sink == NULL ||
-        max_receive_attempts == 0 || max_packets == 0) {
+        (stop_requested == NULL && (max_receive_attempts == 0 || max_packets == 0))) {
         goto cleanup;
     }
 
@@ -81,6 +82,10 @@ L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
         goto cleanup;
     }
 
+    if (stop_requested != NULL && stop_requested(user_context)) {
+        result = L3_POINTCLOUD_SINK_STOPPED;
+        goto cleanup;
+    }
     buffer = malloc(L3_POINTCLOUD_BUFFER_SIZE);
     if (buffer == NULL) {
         result = L3_POINTCLOUD_NO_MEMORY;
@@ -93,6 +98,10 @@ L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
     }
     created = true;
 
+    if (stop_requested != NULL && stop_requested(user_context)) {
+        result = L3_POINTCLOUD_SINK_STOPPED;
+        goto cleanup;
+    }
     stats.sdk_error = DjiMopChannel_Connect(channel, address, L3_POINTCLOUD_MOP_CHANNEL);
     if (stats.sdk_error != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         result = L3_POINTCLOUD_MOP_CONNECT_FAILED;
@@ -101,24 +110,32 @@ L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
     connected = true;
 
     result = L3_POINTCLOUD_READ_LIMIT;
-    while (stats.receive_attempts < max_receive_attempts) {
+    while (stop_requested != NULL || stats.receive_attempts < max_receive_attempts) {
+        if (stop_requested != NULL && stop_requested(user_context)) {
+            result = L3_POINTCLOUD_SINK_STOPPED;
+            break;
+        }
         uint32_t received = 0;
-        ++stats.receive_attempts;
+        if (stats.receive_attempts < UINT32_MAX) ++stats.receive_attempts;
         stats.sdk_error = DjiMopChannel_RecvData(channel, buffer, L3_POINTCLOUD_BUFFER_SIZE, &received);
         if (stats.sdk_error != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
             result = L3_POINTCLOUD_MOP_RECEIVE_FAILED;
             break;
         }
+        if (stop_requested != NULL && stop_requested(user_context)) {
+            result = L3_POINTCLOUD_SINK_STOPPED;
+            break;
+        }
         if (!is_complete_packet(buffer, received)) {
-            ++stats.malformed_packets;
+            if (stats.malformed_packets < UINT32_MAX) ++stats.malformed_packets;
             continue;
         }
-        ++stats.packets_delivered;
+        if (stats.packets_delivered < UINT32_MAX) ++stats.packets_delivered;
         if (!sink(buffer, received, user_context)) {
             result = L3_POINTCLOUD_SINK_STOPPED;
             break;
         }
-        if (stats.packets_delivered == max_packets) {
+        if (stop_requested == NULL && stats.packets_delivered == max_packets) {
             result = L3_POINTCLOUD_OK;
             break;
         }
@@ -141,4 +158,27 @@ cleanup:
         *report = stats;
     }
     return result;
+}
+
+L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
+                                         uint32_t max_receive_attempts,
+                                         uint32_t max_packets,
+                                         L3PointCloudPacketSink sink,
+                                         void *user_context,
+                                         L3PointCloudReadReport *report)
+{
+    return read_packets(mount, max_receive_attempts, max_packets, NULL, sink, user_context, report);
+}
+
+L3PointCloudResult l3_pointcloud_psdk_read_until(E_DjiMountPosition mount,
+                                               L3PointCloudStopRequested stop_requested,
+                                               L3PointCloudPacketSink sink,
+                                               void *user_context,
+                                               L3PointCloudReadReport *report)
+{
+    if (stop_requested == NULL) {
+        if (report != NULL) *report = (L3PointCloudReadReport){0};
+        return L3_POINTCLOUD_INVALID_ARGUMENT;
+    }
+    return read_packets(mount, 0, 0, stop_requested, sink, user_context, report);
 }

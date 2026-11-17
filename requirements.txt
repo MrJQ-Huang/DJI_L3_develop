@@ -1,3 +1,4 @@
 # Linux baseline; the actual Linux environment still needs validation.
 numpy>=1.26,<3
 opencv-python>=4.8,<6
+av>=12,<14.3

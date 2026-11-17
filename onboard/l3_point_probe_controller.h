@@ -24,7 +24,8 @@ typedef enum {
 
 typedef struct {
     E_DjiMountPosition mount; /* Actual L3 payload mount, only ports 1..3. */
-    uint32_t duration_ms;     /* 1..20000; counted from before the sole Start. */
+    uint32_t duration_ms;     /* Probe: 1..20000; continuous: 1..300000 ms. */
+    bool continuous;          /* Explicit streaming mode; false retains probe limits. */
     /* The public SDK has no documented point-cloud-specific recording-state
      * getter. This must represent the user's current confirmation of no
      * existing recording and no other recording control during this session. */
@@ -62,7 +63,8 @@ typedef struct {
 
 /* Caller owns initialized Core/CameraManager and exclusive PSDK use. One
  * invocation per process. Starts L3 point-cloud recording ONCE, then reads at
- * most 30 valid packets / 60 attempts through the existing read-only adapter.
+ * most 30 valid packets / 60 attempts in probe mode. With continuous=true the
+ * reader instead checks the stop/deadline between SDK calls.
  * The reader and stop timer run on separate threads. No video/source/flight
  * operation is performed here.
  *

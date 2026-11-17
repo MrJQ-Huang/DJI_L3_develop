@@ -35,6 +35,7 @@ typedef struct {
 typedef bool (*L3PointCloudPacketSink)(const uint8_t *packet,
                                       uint32_t packet_size,
                                       void *user_context);
+typedef bool (*L3PointCloudStopRequested)(void *user_context);
 
 /* Read-only L3 adapter for PSDK 3.18.0. Caller owns the PSDK application and
  * must initialize CameraManager and MOP before this call. This adapter does
@@ -52,6 +53,15 @@ L3PointCloudResult l3_pointcloud_psdk_read(E_DjiMountPosition mount,
                                          L3PointCloudPacketSink sink,
                                          void *user_context,
                                          L3PointCloudReadReport *report);
+
+/* Continuous read: checks stop between SDK calls; cannot interrupt blocked
+ * Connect/Recv/Close. Caller still owns recording and an independent Stop.
+ * A requested stop returns L3_POINTCLOUD_SINK_STOPPED. */
+L3PointCloudResult l3_pointcloud_psdk_read_until(E_DjiMountPosition mount,
+                                               L3PointCloudStopRequested stop_requested,
+                                               L3PointCloudPacketSink sink,
+                                               void *user_context,
+                                               L3PointCloudReadReport *report);
 
 #ifdef __cplusplus
 }

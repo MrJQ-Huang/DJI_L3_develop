@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +37,7 @@
 #include "l3_rgb_probe.h"
 #include "l3_point_probe_controller.h"
 #include "l3p1_tcp_sink.h"
+#include "l3_stream.h"
 #include "osal/osal.h"
 #include "osal/osal_fs.h"
 
@@ -78,6 +80,8 @@ static void usage(void)
          "       l3_metadata_inspect --config PATH --point-probe --mount 1 --seconds 20 \\\n"
          "         --tcp-host 127.0.0.1 --tcp-port 9010 --exclusive-test\n"
          "       l3_metadata_inspect --config PATH --stop-pointcloud-only --mount 1 --exclusive-test\n"
+         "       l3_metadata_inspect --config PATH --stream --mount 1 --seconds 60\n"
+         "         --bind 127.0.0.1 --point-port 9101 --video-port 9102 --exclusive-test\n"
          "\n"
          "No arguments/--help: no configuration read or SDK initialization.\n"
          "--check-config: validate owner-only regular 0600 file; no SDK calls.\n"
@@ -97,6 +101,8 @@ static void usage(void)
          "use only after the previous SDK process exited, for your own test.\n"
          "Recording duration is not guaranteed: SDK Start/Stop can block.\n"
          "A missing Stop ACK requires manual L3 stop; process exit is not stop.\n"
+         "--stream: explicit dual-stream/recording mode, 1..300 seconds; same\n"
+         "SDK-fix build gate as --point-probe. Two clients per data port.\n"
          "\n"
          "Config: UTF-8, unquoted KEY=VALUE; split at first '='; all required:\n"
          "APP_NAME APP_ID APP_KEY APP_LICENSE DEVELOPER_ACCOUNT BAUD_RATE\n"
@@ -112,7 +118,7 @@ static void usage(void)
          "  --config /private/psdk.conf --inspect\n"
          "A forced kill may prevent SDK cleanup; do not start another SDK app.");
 #if !L3_ENABLE_POINT_RECORDING_PROBE
-    puts("BUILD GATE: --point-probe is DISABLED because the PSDK MOP memory error\n"
+    puts("BUILD GATE: --point-probe/--stream are DISABLED because the PSDK MOP memory error\n"
          "has no verified fix. Refusal occurs before config/TCP/SDK access.\n"
          "--stop-pointcloud-only remains available; it never starts recording.");
 #else
@@ -738,11 +744,90 @@ static int run_point_probe(E_DjiMountPosition mount, unsigned int seconds, L3p1T
     return outcome == L3_POINT_PROBE_OK && !sink->failed ? 0 : 1;
 }
 
+typedef struct {
+    L3Stream *stream;
+    atomic_bool video_failed;
+} LiveStreamContext;
+
+static void publish_video(const uint8_t *bytes, uint32_t size, void *opaque)
+{
+    LiveStreamContext *context = opaque;
+    if (!l3_stream_publish_h264(context->stream, bytes, size)) atomic_store(&context->video_failed, true);
+}
+
+static bool publish_points(const uint8_t *bytes, uint32_t size, void *opaque)
+{
+    LiveStreamContext *context = opaque;
+    return l3_stream_publish_points(context->stream, bytes, size);
+}
+
+static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
+                           const char *bind_ip, unsigned int point_port, unsigned int video_port)
+{
+    LiveStreamContext *context = calloc(1, sizeof(*context));
+    if (context == NULL) return 1;
+    atomic_init(&context->video_failed, false);
+    L3StreamConfig network = { .bind_ip = bind_ip, .point_port = (uint16_t)point_port,
+                               .video_port = (uint16_t)video_port };
+    context->stream = l3_stream_start(&network);
+    if (context->stream == NULL) { free(context); return 1; }
+    int status = 1;
+    bool liveview_initialized = false;
+    T_DjiReturnCode rc = DjiLiveview_Init();
+    if (!sdk_result("stream_liveview_init", rc)) goto finish;
+    liveview_initialized = true;
+    rc = l3_rgb_probe_start(mount, publish_video, context);
+    if (sdk_result("stream_video_start", rc)) {
+        L3PointProbeConfig recording = {
+            .mount = mount, .duration_ms = seconds * 1000U, .continuous = true,
+            .confirmed_no_existing_recording = true, .sink = publish_points,
+            .sink_context = context, .cancel_flag = &stop_requested
+        };
+        L3PointProbeReport report;
+        L3PointProbeController *retained = NULL;
+        printf("event=stream phase=begin seconds=%u point_port=%u video_port=%u recording_start=explicit\n",
+               seconds, point_port, video_port);
+        L3PointProbeOutcome outcome = l3_point_probe_run(&recording, &report, &retained);
+        printf("event=stream phase=recording_stop outcome=%u stop_ack=%s packets=%u malformed=%u cleanup_safe=%s sensor_state_verified=no\n",
+               (unsigned int)outcome, report.stop_command_confirmed ? "yes" : "no",
+               report.reader_report.packets_delivered, report.reader_report.malformed_packets,
+               report.cleanup_safe ? "yes" : "no");
+        if (retained != NULL || !report.cleanup_safe) {
+            /* Pending SDK workers still own context. Exit does not stop recording. */
+            puts("event=stream phase=exit sdk_cleanup=skipped operator_stop_check_required=yes");
+            fflush(stdout);
+            _exit(report.stop_command_confirmed ? 3 : 4);
+        }
+        status = outcome == L3_POINT_PROBE_OK ? 0 : 1;
+    }
+    rc = l3_rgb_probe_stop();
+    if (!sdk_result("stream_video_stop", rc)) status = 1;
+    if (rc == DJI_ERROR_SYSTEM_MODULE_CODE_BUSY) {
+        puts("event=stream phase=exit context_retained=yes delivery_unproven=yes");
+        fflush(stdout);
+        _exit(3);
+    }
+finish:
+    if (liveview_initialized && !sdk_result("stream_liveview_deinit", DjiLiveview_Deinit())) status = 1;
+    L3StreamStats stats;
+    l3_stream_stats(context->stream, &stats);
+    printf("event=stream phase=summary point_packets=%" PRIu64 " video_bytes=%" PRIu64
+           " point_dropped=%" PRIu64 " slow_disconnects=%" PRIu64 " send_errors=%" PRIu64 "\n",
+           stats.point_packets, stats.video_bytes, stats.point_dropped, stats.slow_disconnects, stats.send_errors);
+    if (atomic_load(&context->video_failed) || stats.video_bytes == 0 || stats.point_packets == 0) status = 1;
+    l3_stream_stop(context->stream);
+    free(context);
+    return status;
+}
+
 int main(int argc, char **argv)
 {
     const char *config = NULL;
     bool inspect = false, check_config = false, rgb_probe = false;
     bool point_probe = false, stop_pointcloud = false, exclusive_test = false;
+    bool stream = false;
+    const char *bind_ip = "127.0.0.1";
+    unsigned int point_port = 9101, video_port = 9102;
     const char *tcp_host = NULL;
     unsigned int selected_mount = 0U, probe_seconds = 0U, tcp_port = 0U;
     L3p1TcpSink *point_sink = NULL;
@@ -769,6 +854,14 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--check-config") == 0 && !check_config) check_config = true;
         else if (strcmp(argv[i], "--rgb-probe") == 0 && !rgb_probe) rgb_probe = true;
         else if (strcmp(argv[i], "--point-probe") == 0 && !point_probe) point_probe = true;
+        else if (strcmp(argv[i], "--stream") == 0 && !stream) stream = true;
+        else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) bind_ip = argv[++i];
+        else if (strcmp(argv[i], "--point-port") == 0 && i + 1 < argc) {
+            if (!parse_number(argv[++i], 1U, 65535U, &point_port)) return 2;
+        }
+        else if (strcmp(argv[i], "--video-port") == 0 && i + 1 < argc) {
+            if (!parse_number(argv[++i], 1U, 65535U, &video_port)) return 2;
+        }
         else if (strcmp(argv[i], "--stop-pointcloud-only") == 0 && !stop_pointcloud) stop_pointcloud = true;
         else if (strcmp(argv[i], "--exclusive-test") == 0 && !exclusive_test) exclusive_test = true;
         else if (strcmp(argv[i], "--tcp-host") == 0 && tcp_host == NULL && i + 1 < argc) tcp_host = argv[++i];
@@ -783,32 +876,33 @@ int main(int argc, char **argv)
             }
         }
         else if (strcmp(argv[i], "--seconds") == 0 && probe_seconds == 0U && i + 1 < argc) {
-            if (!parse_number(argv[++i], 1U, 20U, &probe_seconds)) {
-                fputs("--seconds requires RGB 1..10 or point 1..20\n", stderr); return 2;
+            if (!parse_number(argv[++i], 1U, 300U, &probe_seconds)) {
+                fputs("--seconds requires RGB 1..10, point 1..20 or stream 1..300\n", stderr); return 2;
             }
         }
         else { fputs("invalid arguments; use --help\n", stderr); return 2; }
     }
     unsigned int mode_count = (unsigned int)inspect + (unsigned int)check_config +
-                              (unsigned int)rgb_probe + (unsigned int)point_probe + (unsigned int)stop_pointcloud;
+                              (unsigned int)rgb_probe + (unsigned int)point_probe + (unsigned int)stop_pointcloud + (unsigned int)stream;
     if (config == NULL || mode_count != 1U ||
-        ((rgb_probe || point_probe || stop_pointcloud) && selected_mount == 0U) ||
+        ((rgb_probe || point_probe || stop_pointcloud || stream) && selected_mount == 0U) ||
         ((inspect || check_config) && selected_mount != 0U) ||
         (rgb_probe && (probe_seconds == 0U || probe_seconds > 10U)) ||
-        (point_probe && (probe_seconds == 0U || tcp_host == NULL || tcp_port == 0U)) ||
-        (!(rgb_probe || point_probe) && probe_seconds != 0U) ||
+        (point_probe && (probe_seconds == 0U || probe_seconds > 20U || tcp_host == NULL || tcp_port == 0U)) ||
+        (stream && (probe_seconds == 0U || point_port == video_port)) ||
+        (!(rgb_probe || point_probe || stream) && probe_seconds != 0U) ||
         (!point_probe && (tcp_host != NULL || tcp_port != 0U)) ||
-        ((point_probe || stop_pointcloud) != exclusive_test)) {
+        ((point_probe || stop_pointcloud || stream) != exclusive_test)) {
         fputs("invalid mode/parameters; use --help; recording modes require --exclusive-test\n", stderr);
         return 2;
     }
-    if (point_probe) {
+    if (point_probe || stream) {
         struct in_addr address;
-        if (inet_pton(AF_INET, tcp_host, &address) != 1) {
-            fputs("--tcp-host requires an explicit numeric IPv4 address\n", stderr); return 2;
+        if (inet_pton(AF_INET, stream ? bind_ip : tcp_host, &address) != 1) {
+            fputs("--bind/--tcp-host requires an explicit numeric IPv4 address\n", stderr); return 2;
         }
 #if !L3_ENABLE_POINT_RECORDING_PROBE
-        puts("event=point_probe phase=blocked reason=psdk_mop_memory_error_not_resolved");
+        printf("event=%s phase=blocked reason=psdk_mop_memory_error_not_resolved\n", stream ? "stream" : "point_probe");
         return 2;
 #endif
     }
@@ -856,7 +950,7 @@ int main(int argc, char **argv)
     puts("event=phase_begin phase=application_start blocking=yes");
     if (!sdk_result("application_start", DjiCore_ApplicationStart())) goto cleanup;
     for (size_t i = 0U; i < sizeof(mounts) / sizeof(mounts[0]) && !stop_requested; ++i) {
-        if ((rgb_probe || point_probe || stop_pointcloud) && (unsigned int)mounts[i] != selected_mount) continue;
+        if ((rgb_probe || point_probe || stop_pointcloud || stream) && (unsigned int)mounts[i] != selected_mount) continue;
         E_DjiCameraType camera_type = DJI_CAMERA_TYPE_UNKNOWN;
         printf("event=phase_begin phase=camera_type psdk_port=%u blocking=yes\n", (unsigned int)mounts[i]);
         rc = DjiCameraManager_GetCameraType(mounts[i], &camera_type);
@@ -875,6 +969,8 @@ int main(int argc, char **argv)
     status = !stop_requested && l3_count != 0U ? 0 : 1;
     if (rgb_probe && status == 0) status = run_rgb_probe((E_DjiMountPosition)selected_mount, probe_seconds);
     if (point_probe && status == 0) status = run_point_probe((E_DjiMountPosition)selected_mount, probe_seconds, point_sink);
+    if (stream && status == 0) status = run_live_stream((E_DjiMountPosition)selected_mount,
+                                                     probe_seconds, bind_ip, point_port, video_port);
     if (stop_pointcloud && status == 0) {
         puts("event=point_probe phase=emergency_stop_begin start_attempted=no mop_initialized=no blocking=yes");
         rc = DjiCameraManager_StopRecordPointCloud((E_DjiMountPosition)selected_mount);

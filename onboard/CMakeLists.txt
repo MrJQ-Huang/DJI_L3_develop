@@ -1,6 +1,25 @@
 cmake_minimum_required(VERSION 3.16)
 project(l3_metadata_inspect C)
 
+find_package(Threads REQUIRED)
+add_library(l3_stream STATIC l3_stream.c)
+target_include_directories(l3_stream PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(l3_stream PUBLIC c_std_11)
+target_compile_options(l3_stream PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(l3_stream PRIVATE Threads::Threads)
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(test_l3_stream tests/test_l3_stream.c)
+    target_link_libraries(test_l3_stream PRIVATE l3_stream Threads::Threads)
+    target_compile_options(test_l3_stream PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    add_test(NAME l3_stream COMMAND test_l3_stream)
+    set_tests_properties(l3_stream PROPERTIES TIMEOUT 30)
+endif()
+option(L3_BUILD_PSDK_APP "Build Manifold PSDK app alongside portable transport" ON)
+if(NOT L3_BUILD_PSDK_APP)
+    return()
+endif()
+
 # Standalone target: NEVER add_subdirectory() the official comprehensive sample.
 # Configure/build only; this project has no run/install/DPK or post-build actions.
 set(PSDK_ROOT "" CACHE PATH "Official, unmodified DJI Payload-SDK 3.18.0 root")
@@ -17,7 +36,20 @@ set(PSDK_LIBRARY "${PSDK_ROOT}/psdk_lib/lib/aarch64-linux-gnu-gcc/libpayloadsdk.
 if(NOT EXISTS "${PSDK_LIBRARY}")
     message(FATAL_ERROR "Official aarch64-linux-gnu-gcc/libpayloadsdk.a missing")
 endif()
-find_package(Threads REQUIRED)
+if(BUILD_TESTING)
+    add_executable(test_pointcloud_reader l3_pointcloud_psdk.c tests/test_pointcloud_reader.c)
+    target_include_directories(test_pointcloud_reader PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PSDK_ROOT}/psdk_lib/include")
+    target_compile_options(test_pointcloud_reader PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+    add_test(NAME pointcloud_reader COMMAND test_pointcloud_reader)
+    add_executable(test_point_probe_controller l3_point_probe_controller.c tests/test_point_probe_controller.c)
+    target_include_directories(test_point_probe_controller PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PSDK_ROOT}/psdk_lib/include")
+    target_link_libraries(test_point_probe_controller PRIVATE Threads::Threads)
+    target_compile_options(test_point_probe_controller PRIVATE -Wall -Wextra -Werror)
+    foreach(scenario IN ITEMS normal reader-block late-start start-error stop-failure stop-block wrong-type pre-cancel prepare-cancel sink-failure continuous)
+        add_test(NAME controller_${scenario} COMMAND test_point_probe_controller ${scenario})
+        set_tests_properties(controller_${scenario} PROPERTIES TIMEOUT 10)
+    endforeach()
+endif()
 add_executable(l3_metadata_inspect
     metadata_inspect.c
     metadata_socket.c
@@ -39,6 +71,6 @@ target_compile_definitions(l3_metadata_inspect PRIVATE _GNU_SOURCE SYSTEM_ARCH_L
 target_compile_definitions(l3_metadata_inspect PRIVATE
     L3_ENABLE_POINT_RECORDING_PROBE=$<BOOL:${L3_ENABLE_POINT_RECORDING_PROBE}>)
 target_compile_options(l3_metadata_inspect PRIVATE -Wall -Wextra)
-target_link_libraries(l3_metadata_inspect PRIVATE "${PSDK_LIBRARY}" Threads::Threads m dl)
+target_link_libraries(l3_metadata_inspect PRIVATE l3_stream "${PSDK_LIBRARY}" Threads::Threads m dl)
 # Do not enable LIBUSB_INSTALLED: this target uses Manifold's existing functionFS
 # device endpoints. No USB host claiming, sysctl, networking setup, or chmod.
