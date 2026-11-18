@@ -25,8 +25,17 @@ class PreviewState:
     pending: bool = False
     message: str = "正在连接妙算3…"
     generation: int = 0
+    resubscribes: int = 0
+    relistens: int = 0
+    fast_fallback: bool = False
 
     def apply(self, event: dict[str, str]) -> None:
+        if event.get("event") == "fast_switch":
+            if event.get("phase") == "video_relisten":
+                self.relistens += 1
+            elif event.get("phase") == "video_fallback":
+                self.fast_fallback = True
+            return
         if event.get("event") != "video_control" or event.get("action") not in ("status", "switch"):
             return
         try:
@@ -41,6 +50,8 @@ class PreviewState:
         self.current = current
         if event["action"] == "switch":
             self.pending = False
+            if event.get("resubscribe") == "yes":
+                self.resubscribes += 1
             if event.get("success") == "yes" and str(current) == event.get("requested"):
                 self.message = "设备已确认画面源，等待新视频帧"
             elif event.get("code") == UNSUPPORTED:
@@ -66,6 +77,8 @@ def ssh_command(args) -> list[str]:
               "--video-port", str(args.video_port)]
     if args.expected_source is not None:
         remote += ["--expected-source", str(args.expected_source)]
+    if args.fast_switch:
+        remote.append("--fast-switch")
     command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
     if args.identity:
@@ -122,7 +135,7 @@ class PreviewSession:
             self.finished.set()
 
     def send(self, command: str) -> bool:
-        if command not in ("status", "visible", "point", "stop"):
+        if command not in ("status", "visible", "point", "resume", "stop"):
             raise ValueError("unknown preview command")
         with self.lock:
             if self.process is None or self.process.poll() is not None:
@@ -175,6 +188,12 @@ class PreviewApp:
         self.recovering = False
         self.active_source = None
         self.restart_source = None
+        self.fast_available = args.fast_switch
+        self.fast_deadline = None
+        self.resubscribes = 0
+        self.relisten_target = 0
+        self.switch_started = None
+        self.awaiting_switch_frame = False
         self.last_frame_ns = None
         self.final_frame_age = None
         self.last_stats = {}
@@ -210,42 +229,85 @@ class PreviewApp:
                                        streams="video", socks5=self.args.socks5, io_timeout=10).start()
         self.shown = self.previous_bytes = self.previous_frames = 0
 
-    def request_recovery(self, now, source=None):
-        if self.recovering or now - self.started >= self.args.seconds - 10:
+    def stop_receiver(self):
+        if self.receiver is not None:
+            self.receiver.stop()
+            self.received_frames += self.receiver.stats()["video_frames"]
+            self.receiver = None
+
+    def request_recovery(self, now, source=None, fast_failed=False):
+        if self.recovering or now - self.started >= self.args.seconds - (5 if fast_failed else 10):
             return
         # A new TCP decoder cannot join L3's P-only continuation: it needs the
         # startup IDR. Stop this subscription and await full SDK cleanup before
         # starting a fresh process. This never changes the encoder or camera mode.
         self.recovering = True
-        self.restart_source = source if source is not None else self.active_source
-        self.receiver.stop()
-        self.received_frames += self.receiver.stats()["video_frames"]
-        self.receiver = None
+        self.fast_deadline = None
+        if fast_failed:
+            self.fast_available = False
+            source = source if source in SOURCE_NAMES else None
+            print(json.dumps({"event": "hd_fast_fallback", "source": source}), flush=True)
+        self.restart_source = source if fast_failed or source is not None else self.active_source
+        self.awaiting_switch_frame = self.switch_started is not None
+        self.stop_receiver()
         self.session.send("stop")
         with self.session.lock:
             self.session.state.message = ("正在切换画面，重新订阅原始高清流…" if source is not None else
                                           "视频连接中断，正在重新订阅原始高清流…")
 
     def can_switch(self, state):
-        return (not self.recovering and not state.pending and self.session.ready.is_set() and
+        return (not self.recovering and self.fast_deadline is None and not self.awaiting_switch_frame and
+                self.resubscribes == state.resubscribes and not state.pending and self.session.ready.is_set() and
                 not self.session.finished.is_set() and state.current in SOURCE_NAMES and
                 time.monotonic() - self.started < self.args.seconds - 10)
 
     def switch(self):
         state = self.session.snapshot()
-        if self.can_switch(state):
-            self.session.send("visible" if state.current == 14 else "point")
+        now = time.monotonic()
+        if self.can_switch(state) and self.session.send("visible" if state.current == 14 else "point"):
+            self.switch_started = now
+
+    def advance_fast_switch(self, now, state):
+        if self.recovering:
+            return
+        if state.fast_fallback:
+            self.request_recovery(now, source=state.current, fast_failed=True)
+            return
+        if state.resubscribes > self.resubscribes:
+            self.resubscribes = state.resubscribes
+            self.fast_deadline = now + 7.0
+            self.relisten_target = state.relistens + 1
+            self.awaiting_switch_frame = True
+            print(json.dumps({"event": "hd_fast_ack", "source": state.current,
+                              "seconds": round(now - self.switch_started, 3) if self.switch_started is not None else None}),
+                  flush=True)
+            self.stop_receiver()
+            sent = self.session.send("resume")
+            print(json.dumps({"event": "hd_fast_resume", "sent": sent,
+                              "receiver_stop_seconds": round(time.monotonic() - now, 3)}), flush=True)
+            if not sent:
+                self.request_recovery(now, source=state.current, fast_failed=True)
+        if self.fast_deadline is None:
+            return
+        if now >= self.fast_deadline:
+            self.request_recovery(now, source=state.current, fast_failed=True)
+        elif self.receiver is None and state.relistens >= self.relisten_target:
+            self.active_source = state.current
+            self.new_receiver()
 
     def tick(self):
         now = time.monotonic()
         state = self.session.snapshot()
+        self.advance_fast_switch(now, state)
         if self.root:
             label = SOURCE_NAMES.get(state.current, "未知（不能确认画面类型）")
-            self.source_text.set("当前画面：" + label)
-            self.message_text.set(state.message)
+            switching = state.pending or self.awaiting_switch_frame
+            self.source_text.set("切换中 · 保留上一帧" if switching else "当前画面：" + label)
+            self.message_text.set("正在等待新画面…" if self.fast_deadline is not None else state.message)
             self.toggle.configure(text="切到可见光" if state.current == 14 else "切到点云画面",
                                   state="normal" if self.can_switch(state) else "disabled")
-        if self.session.ready.is_set() and self.receiver is None and not self.recovering:
+        if (self.session.ready.is_set() and self.receiver is None and not self.recovering and
+                self.fast_deadline is None):
             self.generation = state.generation
             self.active_source = state.current
             self.new_receiver()
@@ -253,15 +315,17 @@ class PreviewApp:
             if state.current in SOURCE_NAMES:
                 if self.active_source is None:
                     self.active_source = state.current
-                elif state.current != self.active_source:
+                elif state.current != self.active_source and self.fast_deadline is None:
                     if self.root:
-                        self.canvas.itemconfigure(self.image_item, image="")
+                        if self.switch_started is None:
+                            self.canvas.itemconfigure(self.image_item, image="")
                     self.request_recovery(now, source=state.current)
         if self.receiver is not None:
             video = self.receiver.latest_video()
             stats = self.receiver.stats()
             self.last_stats = stats
-            if video is not None and video.sequence != self.shown:
+            if (video is not None and video.sequence != self.shown and not state.pending and
+                    (not self.awaiting_switch_frame or state.current == self.active_source)):
                 self.shown = video.sequence
                 self.last_frame_ns = video.received_monotonic_ns
                 if self.root:
@@ -277,6 +341,17 @@ class PreviewApp:
                     self.photo = self.tk.PhotoImage(data=f"P6\n{w} {h}\n255\n".encode() + rgb.tobytes(), format="PPM")
                     self.canvas.itemconfigure(self.image_item, image=self.photo)
                     self.canvas.coords(self.image_item, cw // 2, ch // 2)
+                if self.awaiting_switch_frame and state.current == self.active_source and state.current in SOURCE_NAMES:
+                    if self.switch_started is not None:
+                        print(json.dumps({"event": "hd_switch_frame", "source": state.current,
+                                          "mode": "fast" if self.fast_deadline is not None else "full",
+                                          "seconds": round(time.monotonic() - self.switch_started, 3),
+                                          "dimensions": list(video.image.shape[:2])}), flush=True)
+                    self.fast_deadline = self.switch_started = None
+                    self.awaiting_switch_frame = False
+                    with self.session.lock:
+                        if self.session.state.message == "设备已确认画面源，等待新视频帧":
+                            self.session.state.message = "原始 H.264 回传"
             if now - self.last_report >= 1:
                 elapsed = now - self.last_report
                 mbps = (stats["video_bytes"] - self.previous_bytes) * 8 / elapsed / 1e6
@@ -292,9 +367,14 @@ class PreviewApp:
                 self.last_report = now
             # The device resets video before its switch ACK reaches SSH. Let
             # that ACK establish the actual source before choosing a restart.
-            if stats["video_disconnects"] > 0 and not state.pending and not self.session.finished.is_set():
+            if (stats["video_disconnects"] > 0 and not state.pending and self.fast_deadline is None and
+                    not self.session.finished.is_set()):
                 self.request_recovery(now)
-        if now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and not self.recovering:
+        if (self.switch_started is not None and not state.pending and not self.awaiting_switch_frame and
+                state.current == self.active_source):
+            self.switch_started = None
+        if (now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and
+                not self.recovering and self.fast_deadline is None):
             self.session.send("status")
             self.last_status = now
         if self.session.finished.is_set() and self.recovering and self.session.returncode == 0:
@@ -303,14 +383,15 @@ class PreviewApp:
                 self.session.close()
                 session_args = argparse.Namespace(**vars(self.args))
                 session_args.seconds = remaining
+                session_args.fast_switch = self.fast_available
                 # A switch result can arrive while the old session drains.
                 # Its final readback takes precedence over the earlier snapshot.
                 final_source = self.session.snapshot().current
                 restart_source = final_source if final_source in SOURCE_NAMES else self.restart_source
-                if restart_source is not None:
-                    session_args.expected_source = restart_source
+                session_args.expected_source = restart_source
                 self.session = PreviewSession(session_args)
                 self.session.start()
+                self.resubscribes = 0
                 self.restarts += 1
                 self.recovering = False
                 print(json.dumps({"event": "hd_restart", "attempt": self.restarts,
@@ -375,6 +456,7 @@ def arguments(argv=None):
     parser.add_argument("--mount", type=int, default=1)
     parser.add_argument("--video-port", type=int, default=9102)
     parser.add_argument("--expected-source", type=int)
+    parser.add_argument("--fast-switch", action="store_true", help="Try in-process video resubscription")
     parser.add_argument("--no-display", action="store_true")
     args = parser.parse_args(argv)
     if (not 1 <= args.seconds <= 300 or args.mount not in (1, 2, 3) or

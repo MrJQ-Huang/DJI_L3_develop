@@ -21,12 +21,17 @@ typedef void (*L3RgbProbeSink)(const uint8_t *data, uint32_t size, void *user);
  * content before treating this as an RGB stream.
  *
  * Run start/stop from one control thread, and apply a finite probe deadline
- * there. Only one SDK start attempt is permitted per process because the SDK
- * callback carries no session token. After any SDK start attempt call stop,
+ * there. This entry point permits one SDK start attempt per process. After
+ * any SDK start attempt call stop,
  * including after a start error, before deinitializing shared SDK modules.
  * Keep user/sink valid until start fails or stop returns. */
 T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
                                    L3RgbProbeSink sink, void *user);
+
+/* Video-only preview may resubscribe after a successful stop on the same
+ * control thread. The old sink has been drained before accepting fresh data. */
+T_DjiReturnCode l3_rgb_probe_restart(E_DjiMountPosition mount,
+                                    L3RgbProbeSink sink, void *user);
 
 /* Disable delivery and drain in-flight sinks, even if the SDK reports a stop
  * error. A failed SDK stop may be retried; it does not prove the subscription

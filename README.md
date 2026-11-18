@@ -21,6 +21,16 @@ bash scripts/start_l3_preview_4g.sh \
 - 点击“切到可见光”或“切到点云画面”。窗口在设备确认后重新订阅视频，取得首个可解码的关键帧。
 - **按 Esc 停止预览**，也可点击“停止预览”或关闭窗口。前台终端可按 Ctrl+C。预览时长参数上限为 300 秒。
 
+支持 `--fast-switch` 的机载构建可试用同进程切换。地面脚本和机载程序需要来自同一版本。用 `--remote-root` 指定新构建所在目录。
+
+```bash
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --ssh-host l3-manifold --seconds 300 \
+  --remote-root /absolute/path/to/updated/onboard-deployment --fast-switch
+```
+
+切换时保留上一帧，等待新源首帧。模式会在原 SDK 会话内停止并重新订阅 Liveview，建立新的视频 TCP 连接。若重订阅失败或等待首帧超时，在机载进程清理并正常退出后回退到完整重连。
+
 ## 实机验证和当前限制
 
 | 项目 | 状态 |

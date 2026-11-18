@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 import threading
 import time
+from types import SimpleNamespace
 from l3_preview import PreviewApp, PreviewState, UNSUPPORTED, arguments, parse_event, ssh_command
 
 
@@ -123,6 +124,76 @@ class PreviewControlTests(unittest.TestCase):
         state.apply(parse_event("event=video_control action=status current=-1 success=no"))
         state.apply(parse_event("event=video_control action=status current=14 success=yes"))
         self.assertEqual(state.generation, 2)
+
+    def test_fast_switch_waits_for_new_tcp_and_decodes_without_reopening_ssh(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display", "--fast-switch", "--seconds", "60"])
+        with patch("l3_preview.PreviewSession") as factory, patch("l3_preview.StreamReceiver") as receiver_factory:
+            session = factory.return_value
+            session.ready = threading.Event()
+            session.ready.set()
+            session.finished = threading.Event()
+            session.lock = threading.Lock()
+            session.send.return_value = True
+            state = PreviewState(current=1, pending=True)
+            session.state = state
+            session.snapshot.side_effect = lambda: PreviewState(**vars(state))
+            old = Mock()
+            old.latest_video.return_value = None
+            old.stats.return_value = {"video_frames": 12, "video_disconnects": 1}
+            app = PreviewApp(args)
+            app.receiver = old
+            app.active_source = 1
+            app.switch_started = time.monotonic()
+            app.tick()
+            session.send.assert_not_called()  # EOF may precede the source readback.
+
+            state.apply(parse_event("event=video_control action=switch requested=14 current=14 success=yes resubscribe=yes"))
+            app.tick()
+            old.stop.assert_called_once()
+            session.send.assert_called_once_with("resume")
+            receiver_factory.assert_not_called()
+            self.assertFalse(app.can_switch(state))
+
+            state.apply(parse_event("event=fast_switch phase=video_relisten"))
+            new = receiver_factory.return_value.start.return_value
+            new.latest_video.return_value = None
+            new.stats.return_value = {"video_disconnects": 0}
+            app.tick()
+            self.assertFalse(app.can_switch(state))
+            new.latest_video.return_value = SimpleNamespace(sequence=1, received_monotonic_ns=time.monotonic_ns(),
+                                                            image=SimpleNamespace(shape=(1080, 1920, 3)))
+            app.tick()
+            self.assertTrue(app.can_switch(state))
+            self.assertIs(app.session, session)
+            self.assertEqual(app.active_source, 14)
+            self.assertEqual(app.received_frames, 12)
+            factory.assert_called_once()
+
+    def test_fast_switch_timeout_waits_for_clean_exit_and_disables_fast_retry(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display", "--fast-switch", "--seconds", "60"])
+        with patch("l3_preview.PreviewSession") as factory:
+            old = factory.return_value
+            old.ready, old.finished = threading.Event(), threading.Event()
+            old.lock = threading.Lock()
+            old.state = PreviewState(current=14, resubscribes=1)
+            old.snapshot.return_value = old.state
+            app = PreviewApp(args)
+            app.resubscribes = 1
+            app.fast_deadline = time.monotonic() - 1
+            app.tick()
+            old.send.assert_called_once_with("stop")
+            factory.assert_called_once()
+            self.assertTrue(app.recovering)
+            old.returncode = 0
+            old.finished.set()
+            new = Mock()
+            new.finished = threading.Event()
+            factory.return_value = new
+            app.tick()
+            self.assertEqual(factory.call_count, 2)
+            self.assertFalse(factory.call_args.args[0].fast_switch)
+            self.assertEqual(factory.call_args.args[0].expected_source, 14)
+            new.start.assert_called_once()
 
     def test_rejected_switch_keeps_actual_source_and_message(self):
         state = PreviewState(current=14, pending=True)

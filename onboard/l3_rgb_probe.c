@@ -16,12 +16,13 @@ static pthread_cond_t drained = PTHREAD_COND_INITIALIZER;
  * it. Never hold callback_lock while calling into the SDK or the user sink. */
 static bool attempted;
 static bool stop_needed;
+static unsigned callback_slot;
 static E_DjiLiveViewCameraPosition position;
 static L3RgbProbeSink active_sink;
 static void *active_user;
 static size_t in_flight;
 
-static void receive_stream(E_DjiLiveViewCameraPosition camera,
+static void receive_stream(unsigned slot, E_DjiLiveViewCameraPosition camera,
                            const uint8_t *data, uint32_t size)
 {
     if (data == NULL || size == 0) {
@@ -29,7 +30,7 @@ static void receive_stream(E_DjiLiveViewCameraPosition camera,
     }
 
     pthread_mutex_lock(&callback_lock);
-    if (active_sink == NULL || camera != position) {
+    if (active_sink == NULL || slot != callback_slot || camera != position) {
         pthread_mutex_unlock(&callback_lock);
         return;
     }
@@ -47,6 +48,18 @@ static void receive_stream(E_DjiLiveViewCameraPosition camera,
     pthread_mutex_unlock(&callback_lock);
 }
 
+/* Keep a late callback from the immediately preceding subscription out of
+ * the new sink. Reuse a slot only after the SDK has acknowledged its stop. */
+static void receive_first(E_DjiLiveViewCameraPosition camera, const uint8_t *data, uint32_t size)
+{
+    receive_stream(0, camera, data, size);
+}
+
+static void receive_second(E_DjiLiveViewCameraPosition camera, const uint8_t *data, uint32_t size)
+{
+    receive_stream(1, camera, data, size);
+}
+
 static void disable_delivery(void)
 {
     pthread_mutex_lock(&callback_lock);
@@ -58,8 +71,8 @@ static void disable_delivery(void)
     pthread_mutex_unlock(&callback_lock);
 }
 
-T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
-                                   L3RgbProbeSink sink, void *user)
+static T_DjiReturnCode start_probe(E_DjiMountPosition mount,
+                                  L3RgbProbeSink sink, void *user, bool restart)
 {
     E_DjiLiveViewCameraPosition camera;
     switch (mount) {
@@ -83,7 +96,7 @@ T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
     }
 
     T_DjiReturnCode rc = DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT_IN_CURRENT_STATE;
-    if (attempted) {
+    if (attempted != restart || stop_needed) {
         goto done;
     }
     E_DjiCameraType type = DJI_CAMERA_TYPE_UNKNOWN;
@@ -99,13 +112,14 @@ T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
     attempted = true;
     stop_needed = true;
     pthread_mutex_lock(&callback_lock);
+    if (restart) callback_slot ^= 1U;
     position = camera;
     active_sink = sink;
     active_user = user;
     pthread_mutex_unlock(&callback_lock);
 
     rc = DjiLiveview_StartStream(camera, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT,
-                                 receive_stream);
+                                callback_slot == 0 ? receive_first : receive_second);
     if (rc != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
         /* Do not assume an SDK error excludes partial startup. The caller
          * must still call stop to request cleanup of this attempted stream. */
@@ -115,6 +129,16 @@ T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount,
 done:
     pthread_mutex_unlock(&control_lock);
     return rc;
+}
+
+T_DjiReturnCode l3_rgb_probe_start(E_DjiMountPosition mount, L3RgbProbeSink sink, void *user)
+{
+    return start_probe(mount, sink, user, false);
+}
+
+T_DjiReturnCode l3_rgb_probe_restart(E_DjiMountPosition mount, L3RgbProbeSink sink, void *user)
+{
+    return start_probe(mount, sink, user, true);
 }
 
 T_DjiReturnCode l3_rgb_probe_stop(void)

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Manifold 3: original PSDK H.264 -> TCP. No encoder, media files or ROS.
-# stdin accepts only status/visible/point/stop, interpreted by the native app.
+# The native app reads an allowlist of preview commands from stdin.
 set -euo pipefail
 umask 077
 bin_dir=
@@ -9,11 +9,13 @@ seconds=60
 mount=1
 video_port=9102
 expected_source=
+fast_switch=()
 while (($#)); do
     case "$1" in
         --help|-h)
-            echo 'Usage: run_l3_preview_onboard.sh --bin-dir DIR --config PRIVATE_FILE [--seconds 60] [--mount 1] [--expected-source ID] [--video-port 9102]'
+            echo 'Usage: run_l3_preview_onboard.sh --bin-dir DIR --config PRIVATE_FILE [--seconds 60] [--mount 1] [--expected-source ID] [--video-port 9102] [--fast-switch]'
             exit 0 ;;
+        --fast-switch) fast_switch=(--fast-switch); shift ;;
         --bin-dir|--config|--seconds|--mount|--expected-source|--video-port)
             (($# >= 2)) || { echo "missing value: $1" >&2; exit 2; }
             option=$1; value=$2; shift 2
@@ -51,4 +53,4 @@ exec timeout --signal=TERM --kill-after=3s "$((seconds + 35))s" \
     "$bin_dir/l3_metadata_inspect" --config "$config" --stream --streams video \
     --mount "$mount" --seconds "$seconds" --bind 127.0.0.1 \
     --point-port 19101 --video-port "$video_port" --exclusive-test \
-    --video-control-stdin "${source_args[@]}"
+    --video-control-stdin "${source_args[@]}" "${fast_switch[@]}"
