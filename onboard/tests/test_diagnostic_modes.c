@@ -17,6 +17,13 @@ T_DjiReturnCode DjiCameraManager_GetCameraType(E_DjiMountPosition mount, E_DjiCa
     *type = wrong_camera ? DJI_CAMERA_TYPE_UNKNOWN : DJI_CAMERA_TYPE_L3;
     return DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
 }
+T_DjiReturnCode DjiCameraManager_GetFirmwareVersion(E_DjiMountPosition mount,
+                                                   T_DjiCameraManagerFirmwareVersion *firmware)
+{
+    assert(mount == DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1);
+    *firmware = (T_DjiCameraManagerFirmwareVersion){.firmware_version = {1, 2, 3, 4}};
+    return metadata_error ? DJI_ERROR_SYSTEM_MODULE_CODE_NONSUPPORT : DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS;
+}
 T_DjiReturnCode DjiCameraManager_GetStreamSourceRange(E_DjiMountPosition mount,
                                                       T_DjiCameraManagerRangeList *range)
 {
@@ -101,6 +108,7 @@ int main(void)
     assert(liveview_inits == 3 && video_starts == 3 && video_stops == 3 && liveview_deinits == 3);
 
     assert(report_video_info(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, "test") == 0);
+    assert(report_camera_firmware(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1) == 0);
     range_size = 17; /* Never traverse a vendor count beyond the 16-entry array. */
     assert(report_video_info(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, "test") == 1);
     range_size = 0;
@@ -108,6 +116,7 @@ int main(void)
     range_size = 2;
     metadata_error = true;
     assert(report_video_info(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, "test") == 1);
+    assert(report_camera_firmware(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1) == 1);
     metadata_error = false;
     wrong_camera = true;
     unsigned int before_queries = range_queries;

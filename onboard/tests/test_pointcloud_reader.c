@@ -9,6 +9,8 @@
 #include <string.h>
 static unsigned received, delivered, created, closed, destroyed;
 static bool cancelled;
+static T_DjiReturnCode receive_error;
+static unsigned fail_receives;
 T_DjiReturnCode DjiCameraManager_GetCameraType(E_DjiMountPosition m, E_DjiCameraType *type)
 { (void)m; *type = DJI_CAMERA_TYPE_L3; return 0; }
 T_DjiReturnCode DjiMopChannel_Create(T_DjiMopChannelHandle *h, E_DjiMopChannelTransType type)
@@ -22,6 +24,7 @@ T_DjiReturnCode DjiMopChannel_Destroy(T_DjiMopChannelHandle h)
 T_DjiReturnCode DjiMopChannel_RecvData(T_DjiMopChannelHandle h, uint8_t *data, uint32_t cap, uint32_t *size)
 {
     (void)h; assert(cap >= 44); ++received;
+    if (received <= fail_receives) return receive_error;
     memset(data, 0, 44); memset(data, 255, 4); data[16] = 16;
     *size = received == 1 ? 0 : 44; return 0;
 }
@@ -29,7 +32,11 @@ static bool stop(void *p) { (void)p; return cancelled || delivered == 40; }
 static bool sink(const uint8_t *data, uint32_t size, void *p)
 { (void)p; assert(data[16] == 16 && size == 44); ++delivered; return true; }
 static void reset(void)
-{ received = delivered = created = closed = destroyed = 0; cancelled = false; }
+{
+    received = delivered = created = closed = destroyed = fail_receives = 0;
+    cancelled = false;
+    receive_error = 0;
+}
 int main(void)
 {
     L3PointCloudReadReport report;
@@ -43,6 +50,23 @@ int main(void)
     reset();
     assert(l3_pointcloud_psdk_read(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 60, 30, sink, NULL, &report) == L3_POINTCLOUD_OK);
     assert(delivered == 30 && received == 31 && closed == 1 && destroyed == 1);
-    puts("PASS continuous packets, pre-connect cancellation, probe limit and cleanup");
+    reset();
+    receive_error = UINT64_C(0x0000000f00000001);
+    fail_receives = 1;
+    assert(l3_pointcloud_psdk_read(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 2, 1, sink, NULL, &report) == L3_POINTCLOUD_OK);
+    assert(received == 2 && delivered == 1 && report.sdk_error == 0);
+    reset();
+    receive_error = UINT64_C(0x0000000f00000001);
+    fail_receives = 2;
+    assert(l3_pointcloud_psdk_read(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 2, 1, sink, NULL, &report) ==
+           L3_POINTCLOUD_MOP_RECEIVE_FAILED);
+    assert(received == 2 && delivered == 0 && report.sdk_error == receive_error && closed == 1 && destroyed == 1);
+    reset();
+    receive_error = DJI_ERROR_MOP_CHANNEL_MODULE_CODE_CONNECTION_CLOSE;
+    fail_receives = 1;
+    assert(l3_pointcloud_psdk_read(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 2, 1, sink, NULL, &report) ==
+           L3_POINTCLOUD_MOP_RECEIVE_FAILED);
+    assert(received == 1 && delivered == 0 && report.sdk_error == receive_error && closed == 1 && destroyed == 1);
+    puts("PASS continuous packets, cancellation, bounded retries, closed channel and cleanup");
     return 0;
 }

@@ -1,60 +1,47 @@
-# DJI L3 开发交接
+# DJI L3 机载 4G 实时预览
 
-2026-11-17最新要求：只用妙算3/PSDK，把二维点云画面按普通高清视频显示，不接RViz，不二次编码或降低分辨率/码率。已修正固定SDK的USB越读、退出适配，并加入断线后完整重新订阅；90秒实测解码543帧、两次恢复画面，机载正常退出。**持续原码率回传与软件切换仍未通过**：原流约15Mbps，当前路径约5Mbps，SDK切源仍未成功；SDK退出仍有泄漏报告。当前部署、修复边界见[最新修复记录](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#10-sdk越读退出与视频恢复修复2026-11-17)。
+本项目使用 DJI Matrice 400、禅思 L3 和妙算3，将 L3 的原始 H.264 码流经机载 4G 和 Tailscale 传到 Linux 电脑。当前窗口支持在 **可见光广角**和**二维点云画面**之间切换。回传保留相机原始分辨率和码率，窗口缩放只影响本地显示。
 
-```bash
-bash scripts/start_l3_preview_4g.sh --host MANIFOLD_TAILNET_IP --seconds 300
-```
+**全程地面联调。严禁起飞、启用电机或调用飞控。**
 
-以下为历史阶段记录。
+## 启动高清预览
 
-2026-11-17点云优先：已实现仅点云/双流机载入口、TCP分发、接收解码及本机ROS/RViz桥接。实际机载4G合成点流在本机RViz运行32秒，接收/发布319包，无点包或ROS发布错误；14项妙算原生测试及6项新增ROS测试通过。真实XYZ仍未取得：纯Core无相机/无录制诊断在本项目与官方socket收发下都复现SDK内部28→4096越读，录制门槛保持关闭。构建、测试、接收命令与最新状态统一见[开发方案](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#7-已实现代码运行与实测边界)，下方旧日期记录作为历史参考。
-
-2026-11-16 测试更新：[L3 视频与点云首次测试记录](docs/TEST_REPORT_2026-11-16.md)。已从妙算取得并解码 L3 1920×1080 可见光预览；发现 PSDK 内部运行期越界读取，实际点云录制和稳定双流回传尚未执行。先解决 SDK 问题，禁止把短样本或纯模拟测试写成实时双流通过。
-
-2026-11-16 当前开发方案见 [空地多模态数据传输开发方案](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md)：保留单仓库的协议、机载、地面三个构建模块；先验证真实双流，再完成有线、机载4G与 Tailscale、多 PC 和 ROS 2。妙算 E2 的 SSH 与专用 PSDK 元数据程序已实机通过，L3 精确确认在 PSDK 负载位置 1；PSDK 视频和点云尚未取流。全程地面，严禁起飞。下方旧日期内容作为历史交接记录。
-
-2026-11-10 接续：妙算3和 L3 已接入 M400。现阶段数据链路不经过遥控器，参见 [妙算3 → Linux 直传开发基线](docs/MANIFOLD_DIRECT_LINK.md)。当前新增离线点云解析与接收诊断，双流实机取数及无线直传尚未验证。
-
-2026-11-04 更新：取得妙算 3后的硬件准备、PSDK 真实点云订阅、电脑传输与 PointCloud2/RViz 验收流程见 [妙算 3点云开发流程](docs/MANIFOLD3_POINTCLOUD_WORKFLOW.md)。本机 Linux RGB/RViz 已验证，真实 XYZ 尚未接通；下文未更新条目保留原交接阶段的记录。
-
-本仓库保存 2026-11-03 在 Windows 上完成的 Matrice 400 / Zenmuse L3 / DJI RC Plus 2 图像取帧原型，以及交给 Linux 开发环境的接续说明。
-
-**用户硬性要求：严禁起飞，只允许获取 L3 数据。所有验证均为地面验证。**
-
-## 从这里开始
-
-1. 下一位 agent 先读 [AGENTS.md](AGENTS.md) 和 [HANDOFF.md](HANDOFF.md)。
-   当前目标、已验证状态和阶段验收以 [开发方案](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md) 为准。
-2. Linux 环境和操作步骤见 [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md)。
-3. 已验证的 PC 接收器是 [pc_viewer/receiver.py](pc_viewer/receiver.py)。
-4. 遥控器专用页面见 [android/L3ReadOnlyActivity.kt](android/L3ReadOnlyActivity.kt)；对固定 DJI 上游提交的完整修改见 [Android 补丁](android/patches/msdk-5.18-l3-read-only.patch)。
-
-## 当前状态
-
-| 项目 | 状态 |
-|---|---|
-| L3 可见光帧经遥控器、USB 传至 Windows 并显示 | 已实机验证，1920×1080，采样上限 5 fps |
-| PC 获取可供 OpenCV 使用的 BGR NumPy 数组 | 已实现 |
-| Linux 历史遥控器图像链路 | Ubuntu 22.04 / ROS 2 Humble 的 RGB/RViz 已验证；新 PSDK 双流链路另行验收 |
-| L3 真实 XYZ / intensity / RGB 点云 | 尚未接入 |
-| MSDK MOP 直接连接 L3 | 仅发现可验证的接口路径，尚未成功取点 |
-| 妙算3 → 4G → 本机ROS 2 / RViz2 | 已实现并通过合成点流；真实PSDK点云受SDK内存错误阻塞 |
-| 妙算3 SSH、PSDK 初始化、M400 与 L3 精确识别 | 2026-11-16 已实机通过；E2 / 192.168.42.130，L3 位于 PSDK 负载位置 1 |
-| 图像和点云硬件同步 / 高精度建图 | 尚未实现 |
-
-## Linux 最小启动
-
-按 Linux 文档安装 ADB、Python 和依赖后：
+地面电脑需要 Python 3、Tk、SSH 和已连通的私有 Tailscale。妙算3接 M400 的 E-Port V2，运行基于固定版本 **PSDK 3.18.0** 构建的 `l3_metadata_inspect`。本机通过 SSH 启动机载会话，并通过 SOCKS5 接收从妙算 TCP 9102 转发的码流。接线、构建和网络设置见 [Linux 环境](docs/LINUX_SETUP.md#c-当前二维视频预览不使用rviz)、[机载程序](onboard/README.md)和[部署说明](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md)。
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python pc_viewer/test_protocol.py
-bash scripts/start_linux.sh
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --ssh-host l3-manifold --seconds 300
 ```
 
-遥控器需已安装对应 APK、通过新电脑的 USB 调试授权，且前台为 `L3ReadOnlyActivity`。脚本只设置 USB 端口映射并启动相机读取页面、电脑接收器。
+将 `MANIFOLD_TAILNET_IP` 换成妙算3的私有 Tailscale 地址，`l3-manifold` 换成已配置的 SSH 别名。默认使用本机 SOCKS5 `127.0.0.1:1055` 和机载部署 `repair-20261117`，可用 `--socks5`、`--remote-root` 和 `--remote-config` 指定自己的部署。预览直接使用妙算3上的 PSDK，地面端只需普通视频窗口。
 
-本仓库没有上传 App Key、APK、签名文件、设备序列号、原始运行日志或实际拍摄的画面。构建需要从原持有人处取得匹配包名的 App Key；同一遥控器上已安装的 APK 可以直接用于 Linux 接收，不需要为了换电脑重新编译。
+- 开启时读取 L3 当前源。源 `1` 为可见光广角，源 `14` 为二维点云画面。
+- 点击“切到可见光”或“切到点云画面”。窗口在设备确认后重新订阅视频，取得首个可解码的关键帧。
+- **按 Esc 停止预览**，也可点击“停止预览”或关闭窗口。前台终端可按 Ctrl+C。预览时长参数上限为 300 秒。
 
+## 实机验证和当前限制
+
+| 项目 | 状态 |
+| --- | --- |
+| 可见光和二维点云画面切换 | 2026-11-17 实机完成 `14 → 1 → 14 → 1 → 14`，每段收到至少 30 帧新的 1920×1080 画面。 |
+| 机载 4G 回传 | 2026-11-18 的预览会话实际解码 2,995 帧 1920×1080 视频，包含 3 次重订阅，机载程序正常退出。长时间稳定回传仍待验收。 |
+| 实时 XYZ 激光点云 | 尚未取得有效点包。录制启动和 MOP 49154 连接成功后，`RecvData` 返回 `0x0000000f00000001` 或阻塞。详见[故障记录](docs/dji-support-2026-11-17/README.md)。 |
+| ROS 2 `PointCloud2` / RViz | 桥接与机载 4G 通路已用合成点流验证。真实 XYZ 接入仍依赖 L3 输出有效点包。 |
+
+源 `14` 输出的是供人观看的二维 H.264 画面。真实 XYZ 取数通过独立的 MOP 接收路径，默认构建保持 `L3_ENABLE_POINT_RECORDING_PROBE=OFF`。接收重试用于诊断，实机点云问题仍待解决。可用独立的 `l3_metadata_inspect --config PATH --camera-firmware --mount 1` 查询所选位置上已确认的 L3 固件。
+
+项目在固定 PSDK 库的构建副本中修复已复现的 USB 越读，并修正线程退出适配。后续视频诊断仍有 SDK 内存泄漏报告。版本约束、切源兼容处理和实验边界见[修复与验收记录](docs/REMOTE_SYSTEM_DEVELOPMENT_PLAN.md#11-切源按钮修复2026-11-17)。
+
+## 项目入口
+
+| 路径 | 用途 |
+| --- | --- |
+| [onboard/](onboard/README.md) | 妙算3 PSDK 应用、L3 预览与点云诊断、TCP 分发 |
+| [pc_viewer/l3_preview.py](pc_viewer/l3_preview.py) | 4G 高清预览窗口、切源控制与断线恢复 |
+| [pc_viewer/l3_ros_bridge.py](pc_viewer/l3_ros_bridge.py) | ROS 2 图像和点云桥接 |
+| [android/](android/L3ReadOnlyActivity.kt) 和 [pc_viewer/receiver.py](pc_viewer/receiver.py) | 早期 DJI RC Plus 2 / MSDK 可见光实验及 USB 接收器，操作步骤见 [Linux 环境](docs/LINUX_SETUP.md#a-地面电脑先复现-rgb不急着安装-ros-或-android-studio) |
+| [HANDOFF.md](HANDOFF.md) 和 [AGENTS.md](AGENTS.md) | 工程交接、验收证据及实机操作范围 |
+
+仓库使用占位配置和合成测试数据。应用凭据、签名、设备身份、原始日志和实机画面保留在私有目录。

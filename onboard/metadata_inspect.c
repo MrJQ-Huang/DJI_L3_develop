@@ -93,6 +93,7 @@ static void usage(void)
     puts("Usage: l3_metadata_inspect --help\n"
          "       l3_metadata_inspect --config PATH --check-config\n"
          "       l3_metadata_inspect --config PATH --inspect\n"
+         "       l3_metadata_inspect --config PATH --camera-firmware --mount 1\n"
          "       l3_metadata_inspect --config PATH --video-info --mount 1\n"
          "       l3_metadata_inspect --config PATH --sdk-diagnostic --seconds 60\n"
          "         [--diagnostic-video --mount 1]\n"
@@ -110,6 +111,7 @@ static void usage(void)
          "--check-config: validate owner-only regular 0600 file; no SDK calls.\n"
          "--inspect: initialize PSDK, require M400, query camera TYPE at the\n"
          "three documented PSDK payload mounts, then deinitialize and exit.\n"
+         "--camera-firmware: require exact L3 at --mount 1..3 and read its firmware.\n"
          "--video-info: require exact L3, read supported/current video sources.\n"
          "Raw source IDs are metadata, not proof of point-cloud video support.\n"
          "--sdk-diagnostic: Core/ApplicationStart/aircraft metadata and a bounded\n"
@@ -941,6 +943,23 @@ static int report_video_info(E_DjiMountPosition mount, const char *phase)
     return valid_range && status_rc == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS ? 0 : 1;
 }
 
+static int report_camera_firmware(E_DjiMountPosition mount)
+{
+    T_DjiCameraManagerFirmwareVersion firmware = {0};
+    puts("event=phase_begin phase=camera_firmware blocking=yes");
+    T_DjiReturnCode rc = DjiCameraManager_GetFirmwareVersion(mount, &firmware);
+    printf("event=camera_firmware psdk_port=%u code=0x%016" PRIx64,
+           (unsigned int)mount, (uint64_t)rc);
+    if (rc == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
+        const uint8_t *v = firmware.firmware_version;
+        printf(" version=%u.%u.%u.%u hex=%02x%02x%02x%02x",
+               (unsigned int)v[0], (unsigned int)v[1], (unsigned int)v[2], (unsigned int)v[3],
+               (unsigned int)v[0], (unsigned int)v[1], (unsigned int)v[2], (unsigned int)v[3]);
+    }
+    putchar('\n');
+    return rc == DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS ? 0 : 1;
+}
+
 static bool check_video_source(E_DjiMountPosition mount, unsigned int expected)
 {
     L3VideoControlResult current = l3_video_source_read(mount);
@@ -1153,6 +1172,7 @@ int main(int argc, char **argv)
     bool video_info = false;
     bool video_control = false;
     int expected_source = -1;
+    bool camera_firmware = false;
     const char *streams = NULL;
     const char *bind_ip = "127.0.0.1";
     unsigned int point_port = 9101, video_port = 9102;
@@ -1193,6 +1213,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--streams") == 0 && streams == NULL && i + 1 < argc) streams = argv[++i];
         else if (strcmp(argv[i], "--sdk-diagnostic") == 0 && !sdk_diagnostic) sdk_diagnostic = true;
         else if (strcmp(argv[i], "--diagnostic-video") == 0 && !diagnostic_video) diagnostic_video = true;
+        else if (strcmp(argv[i], "--camera-firmware") == 0 && !camera_firmware) camera_firmware = true;
         else if (strcmp(argv[i], "--bind") == 0 && i + 1 < argc) bind_ip = argv[++i];
         else if (strcmp(argv[i], "--point-port") == 0 && i + 1 < argc) {
             if (!parse_number(argv[++i], 1U, 65535U, &point_port)) return 2;
@@ -1222,12 +1243,12 @@ int main(int argc, char **argv)
     }
     unsigned int mode_count = (unsigned int)inspect + (unsigned int)check_config +
                               (unsigned int)rgb_probe + (unsigned int)point_probe + (unsigned int)stop_pointcloud +
-                              (unsigned int)stream + (unsigned int)sdk_diagnostic +
+                              (unsigned int)stream + (unsigned int)sdk_diagnostic + (unsigned int)camera_firmware +
                               (unsigned int)video_info;
     if (config == NULL || mode_count != 1U ||
         (expected_source >= 0 && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
         (video_control && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
-        ((rgb_probe || point_probe || stop_pointcloud || stream || diagnostic_video || video_info) && selected_mount == 0U) ||
+        ((rgb_probe || point_probe || stop_pointcloud || stream || diagnostic_video || camera_firmware || video_info) && selected_mount == 0U) ||
         ((inspect || check_config) && selected_mount != 0U) ||
         (diagnostic_video && !sdk_diagnostic) ||
         (sdk_diagnostic && (probe_seconds == 0U || (!diagnostic_video && selected_mount != 0U))) ||
@@ -1308,7 +1329,7 @@ int main(int argc, char **argv)
     puts("event=phase_begin phase=application_start blocking=yes");
     if (!sdk_result("application_start", DjiCore_ApplicationStart())) goto cleanup;
     for (size_t i = 0U; i < sizeof(mounts) / sizeof(mounts[0]) && !stop_requested; ++i) {
-        if ((rgb_probe || point_probe || stop_pointcloud || stream || diagnostic_video || video_info) &&
+        if ((rgb_probe || point_probe || stop_pointcloud || stream || diagnostic_video || camera_firmware || video_info) &&
             (unsigned int)mounts[i] != selected_mount) continue;
         E_DjiCameraType camera_type = DJI_CAMERA_TYPE_UNKNOWN;
         printf("event=phase_begin phase=camera_type psdk_port=%u blocking=yes\n", (unsigned int)mounts[i]);
@@ -1326,6 +1347,8 @@ int main(int argc, char **argv)
     printf("event=summary camera_query_successes=%u l3_ports_found=%u interrupted=%s\n",
            query_successes, l3_count, stop_requested ? "yes" : "no");
     status = !stop_requested && l3_count != 0U ? 0 : 1;
+    if (camera_firmware && status == 0)
+        status = report_camera_firmware((E_DjiMountPosition)selected_mount);
     if (video_info && status == 0)
         status = report_video_info((E_DjiMountPosition)selected_mount, "inspect");
     if (sdk_diagnostic && status == 0)

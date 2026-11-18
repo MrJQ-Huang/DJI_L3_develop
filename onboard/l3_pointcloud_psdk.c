@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 #include "dji_camera_manager.h"
 #include "dji_mop_channel.h"
@@ -98,6 +99,10 @@ static L3PointCloudResult read_packets(E_DjiMountPosition mount,
     }
     created = true;
 
+    /* The official point-cloud sample waits after MOP create before the first
+     * Connect; mirror that bounded delay instead of connecting instantly. */
+    usleep(2000U * 1000U);
+
     if (stop_requested != NULL && stop_requested(user_context)) {
         result = L3_POINTCLOUD_SINK_STOPPED;
         goto cleanup;
@@ -110,6 +115,7 @@ static L3PointCloudResult read_packets(E_DjiMountPosition mount,
     connected = true;
 
     result = L3_POINTCLOUD_READ_LIMIT;
+    uint32_t consecutive_receive_errors = 0;
     while (stop_requested != NULL || stats.receive_attempts < max_receive_attempts) {
         if (stop_requested != NULL && stop_requested(user_context)) {
             result = L3_POINTCLOUD_SINK_STOPPED;
@@ -119,9 +125,18 @@ static L3PointCloudResult read_packets(E_DjiMountPosition mount,
         if (stats.receive_attempts < UINT32_MAX) ++stats.receive_attempts;
         stats.sdk_error = DjiMopChannel_RecvData(channel, buffer, L3_POINTCLOUD_BUFFER_SIZE, &received);
         if (stats.sdk_error != DJI_ERROR_SYSTEM_MODULE_CODE_SUCCESS) {
-            result = L3_POINTCLOUD_MOP_RECEIVE_FAILED;
-            break;
+            /* A closed channel cannot recover in this read loop. For other
+             * receive errors, stop at either the consecutive or probe limit. */
+            if (stats.sdk_error == DJI_ERROR_MOP_CHANNEL_MODULE_CODE_CONNECTION_CLOSE ||
+                ++consecutive_receive_errors >= 20 ||
+                (stop_requested == NULL && stats.receive_attempts >= max_receive_attempts)) {
+                result = L3_POINTCLOUD_MOP_RECEIVE_FAILED;
+                break;
+            }
+            usleep(200U * 1000U);
+            continue;
         }
+        consecutive_receive_errors = 0;
         if (stop_requested != NULL && stop_requested(user_context)) {
             result = L3_POINTCLOUD_SINK_STOPPED;
             break;
