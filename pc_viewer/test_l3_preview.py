@@ -1,14 +1,81 @@
 """Synthetic preview control tests; no aircraft, SSH connection or real media."""
+from io import StringIO
 import shlex
+from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 import threading
 import time
 from types import SimpleNamespace
-from l3_preview import PreviewApp, PreviewState, UNSUPPORTED, arguments, parse_event, ssh_command
+from l3_preview import PreviewApp, PreviewSession, PreviewState, UNSUPPORTED, arguments, parse_event, ssh_command
 
 
 class PreviewControlTests(unittest.TestCase):
+    def test_retries_banner_timeout_before_remote_preview_starts(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display"])
+        timeout = "Connection timed out during banner exchange\n"
+        connected = "event=stream phase=video_listen\n"
+        for log, retry in ((timeout, True), ("event=preview_begin\n" + timeout, False)):
+            with self.subTest(retry=retry), TemporaryDirectory() as directory, \
+                    patch("l3_preview.tempfile.mkdtemp", return_value=directory), \
+                    patch("l3_preview.subprocess.Popen") as launch:
+                first, second = MagicMock(), MagicMock()
+                for process, output, code in ((first, log, 255), (second, connected, 0)):
+                    process.__enter__.return_value = process
+                    process.stdout = StringIO(output)
+                    process.wait.return_value = code
+                launch.side_effect = [first, second]
+                session = PreviewSession(args)
+                with patch.object(session.stopping, "wait", return_value=False):
+                    session._run()
+                self.assertEqual(launch.call_count, 2 if retry else 1)
+                self.assertEqual(session.returncode, 0 if retry else 255)
+                self.assertEqual(session.ready.is_set(), retry)
+
+    def test_startup_failure_keeps_the_error_visible(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display"])
+        with patch("l3_preview.PreviewSession") as factory:
+            session = factory.return_value
+            session.ready, session.finished = threading.Event(), threading.Event()
+            session.finished.set()
+            session.returncode = 255
+            state = PreviewState(message="4G SSH 握手超时")
+            session.snapshot.return_value = state
+            app = PreviewApp(args)
+            app.root = Mock()
+            app.toggle = Mock()
+            app.message_text = Mock()
+            app.source_text = Mock()
+            app.tick()
+            self.assertTrue(app.startup_failed)
+            self.assertFalse(app.closed)
+            app.message_text.set.assert_called_with(state.message)
+            app.root.destroy.assert_not_called()
+
+    def test_auto_yolo_uses_first_fresh_visible_frame_once(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display", "--yolo-engine",
+                          "/tmp/YOLOX.engine", "--start-yolo"])
+        with patch("l3_preview.PreviewSession") as factory:
+            session = factory.return_value
+            session.ready, session.finished = threading.Event(), threading.Event()
+            session.ready.set()
+            state = PreviewState(current=14, yolo_available=True)
+            session.snapshot.return_value = state
+            session.send.return_value = True
+            app = PreviewApp(args)
+            now = time.monotonic()
+            frame = SimpleNamespace(received_monotonic_ns=time.monotonic_ns() - 3_000_000_000)
+            app.start_yolo_on_first_frame(state, frame, now)
+            session.send.assert_not_called()
+            frame.received_monotonic_ns = time.monotonic_ns()
+            app.start_yolo_on_first_frame(state, frame, now)
+            app.start_yolo_on_first_frame(state, frame, now)
+            session.send.assert_called_once_with("visible")
+            state.current = 1
+            app.start_yolo_on_first_frame(state, frame, now)
+            app.start_yolo_on_first_frame(state, frame, now)
+            self.assertEqual([call.args[0] for call in session.send.call_args_list], ["visible", "yolo on"])
+
     def test_button_toggles_actual_l3_sources_and_blocks_during_transition(self):
         args = arguments(["--host", "127.0.0.1", "--seconds", "60", "--no-display"])
         with patch("l3_preview.PreviewSession") as factory:

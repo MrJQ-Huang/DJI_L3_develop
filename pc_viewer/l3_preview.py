@@ -97,7 +97,7 @@ def ssh_command(args) -> list[str]:
         remote.append("--fast-switch")
     if args.yolo_engine:
         remote += ["--yolo-engine", args.yolo_engine, "--yolo-bitrate", str(args.yolo_bitrate)]
-    command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+    command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
     if args.identity:
         command += ["-i", args.identity]
@@ -111,6 +111,7 @@ class PreviewSession:
         self.lock = threading.Lock()
         self.ready = threading.Event()
         self.finished = threading.Event()
+        self.stopping = threading.Event()
         self.process = None
         self.returncode = None
         root = Path(__file__).resolve().parents[1] / ".validation"
@@ -129,22 +130,45 @@ class PreviewSession:
         try:
             log_fd = os.open(self.log_dir / "onboard.private.log", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(log_fd, "w", encoding="utf-8") as log:
-                self.process = subprocess.Popen(ssh_command(self.args), stdin=subprocess.PIPE,
-                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                                text=True, encoding="utf-8", errors="replace", bufsize=1)
                 logged = 0
-                # readline's bound also prevents an unexpected SDK line from growing RAM.
-                while line := self.process.stdout.readline(8192):
-                    if logged < 4 * 1024 * 1024:
-                        log.write(line)
-                        log.flush()
-                        logged += len(line.encode("utf-8"))
-                    event = parse_event(line)
+                for attempt in range(2):
+                    if self.stopping.is_set():
+                        break
+                    remote_reported = False
+                    timed_out = False
+                    with subprocess.Popen(ssh_command(self.args), stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                          text=True, encoding="utf-8", errors="replace", bufsize=1) as process:
+                        self.process = process
+                        if self.stopping.is_set():
+                            process.terminate()
+                        # Bound individual SDK log lines as well as the whole log file.
+                        while line := process.stdout.readline(8192):
+                            if logged < 4 * 1024 * 1024:
+                                log.write(line)
+                                log.flush()
+                                logged += len(line.encode("utf-8"))
+                            event = parse_event(line)
+                            timed_out |= ("timed out during banner exchange" in line or
+                                          line.startswith("ssh: connect to host ") and "timed out" in line)
+                            with self.lock:
+                                if attempt and event and not remote_reported:
+                                    self.state.message = "正在连接妙算3…"
+                                self.state.apply(event)
+                            remote_reported |= bool(event)
+                            if event.get("phase") in ("video_listen", "video_hold"):
+                                self.ready.set()
+                        self.returncode = process.wait()
+                    if self.returncode != 255 or remote_reported or not timed_out:
+                        with self.lock:
+                            if self.returncode and (not remote_reported or self.state.message == "正在连接妙算3…"):
+                                self.state.message = f"4G 预览启动失败（退出码 {self.returncode}）"
+                        break
                     with self.lock:
-                        self.state.apply(event)
-                    if event.get("phase") in ("video_listen", "video_hold"):
-                        self.ready.set()
-                self.returncode = self.process.wait()
+                        self.state.message = ("4G SSH 握手超时，正在重试…" if attempt == 0 else
+                                              "4G SSH 握手超时。请检查妙算3的 4G 和 Tailscale 连接。")
+                    if attempt == 1 or self.stopping.wait(0.5):
+                        break
         except (OSError, ValueError) as error:
             with self.lock:
                 self.state.message = "连接失败：" + type(error).__name__
@@ -180,6 +204,7 @@ class PreviewSession:
                 return False
 
     def close(self):
+        self.stopping.set()
         self.send("stop")
         if self.process is not None:
             try:
@@ -220,11 +245,14 @@ class PreviewApp:
         self.switch_started = None
         self.yolo_started = None
         self.yolo_active = False
+        self.auto_start_yolo = args.start_yolo
+        self.auto_visible_requested = False
         self.awaiting_switch_frame = False
         self.last_frame_ns = None
         self.final_frame_age = None
         self.last_stats = {}
         self.closed = False
+        self.startup_failed = False
         self.root = None
         if not args.no_display:
             import tkinter as tk
@@ -303,7 +331,18 @@ class PreviewApp:
     def toggle_yolo(self):
         state = self.session.snapshot()
         if self.can_toggle_yolo(state) and self.session.send("yolo off" if self.yolo_active else "yolo on"):
+            self.auto_start_yolo = False
             self.yolo_started = time.monotonic()
+
+    def start_yolo_on_first_frame(self, state, video, now):
+        if not self.auto_start_yolo or time.monotonic_ns() - video.received_monotonic_ns >= 2_000_000_000:
+            return
+        if state.current == 1:
+            self.toggle_yolo()
+        elif state.current == 14 and not self.auto_visible_requested and self.can_switch(state):
+            if self.session.send("visible"):
+                self.auto_visible_requested = True
+                self.switch_started = now
 
     def switch(self):
         state = self.session.snapshot()
@@ -408,6 +447,7 @@ class PreviewApp:
                             self.yolo_started = None
                         elif self.session.state.message == "设备已确认画面源，等待新视频帧":
                             self.session.state.message = "原始 H.264 回传"
+                self.start_yolo_on_first_frame(state, video, now)
             if now - self.last_report >= 1:
                 elapsed = now - self.last_report
                 mbps = (stats["video_bytes"] - self.previous_bytes) * 8 / elapsed / 1e6
@@ -456,7 +496,11 @@ class PreviewApp:
                 self.recovering = False
                 print(json.dumps({"event": "hd_restart", "attempt": self.restarts,
                                   "remaining_seconds": remaining, "reencode": False}), flush=True)
-        if self.session.finished.is_set() or now - self.started > self.args.seconds + 40:
+        if self.session.finished.is_set() and self.root and self.session.returncode and self.last_frame_ns is None:
+            self.startup_failed = True
+            self.message_text.set(self.session.snapshot().message)
+            print(f"4G 预览未启动。日志位于 {self.session.log_dir}", flush=True)
+        elif self.session.finished.is_set() or now - self.started > self.args.seconds + 40:
             self.close()
 
     def close(self):
@@ -480,10 +524,12 @@ class PreviewApp:
                     if not self.closed:
                         try:
                             self.tick()
+                        except KeyboardInterrupt:
+                            self.close()
                         except Exception:
                             self.close()
                             raise
-                        if not self.closed:
+                        if not self.closed and not self.startup_failed:
                             self.root.after(30, update)
                 self.root.after(30, update)
                 self.root.mainloop()
@@ -499,7 +545,8 @@ class PreviewApp:
                           "restarts": self.restarts,
                           "last_frame_age_seconds": round(self.final_frame_age, 2) if self.final_frame_age is not None else None,
                           "received_frames": self.received_frames, "last_stats": self.last_stats,
-                          "logs": str(self.session.log_dir)}), flush=True)
+                          "logs": str(self.session.log_dir),
+                          "failure": self.session.snapshot().message if self.session.returncode else None}), flush=True)
         fresh = self.final_frame_age is not None and self.final_frame_age < 3
         return 0 if self.session.returncode == 0 and self.received_frames > 0 and fresh else 1
 
@@ -519,6 +566,7 @@ def arguments(argv=None):
     parser.add_argument("--fast-switch", action="store_true", help="Try in-process video resubscription")
     parser.add_argument("--yolo-engine", help="Absolute path to the Manifold YOLOX-s TensorRT engine")
     parser.add_argument("--yolo-bitrate", type=int, default=4000000, help="Annotated H.264 bitrate in bit/s")
+    parser.add_argument("--start-yolo", action="store_true", help="Enable YOLO after the first visible-light frame")
     parser.add_argument("--no-display", action="store_true")
     args = parser.parse_args(argv)
     if (not 1 <= args.seconds <= 300 or args.mount not in (1, 2, 3) or
@@ -530,6 +578,8 @@ def arguments(argv=None):
     if args.yolo_engine is not None and (not args.yolo_engine.startswith("/") or
                                          not 500000 <= args.yolo_bitrate <= 25000000):
         parser.error("YOLO requires an absolute engine path and a bitrate of 500000..25000000")
+    if args.start_yolo and args.yolo_engine is None:
+        parser.error("--start-yolo requires --yolo-engine")
     args.fast_switch = args.fast_switch or args.yolo_engine is not None
     args.socks5 = args.socks5 or None
     # Validate networking/decode prerequisites before starting the remote SDK.
