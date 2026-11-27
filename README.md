@@ -42,19 +42,26 @@ bash scripts/start_l3_preview_4g.sh \
   --precisionConstraints=obey '--layerPrecisions=*:fp16'
 ```
 
-有线部署完成后，用机载 4G 上的 Tailscale 地址验收。先让 L3 处于可见光源，再从 PC 启动。
+### 一键启动 4G 预览和 YOLO
+
+妙算3部署完成且 PC 已接通 Tailscale 后，在 PC 的仓库根目录运行以下命令。先在代码块前两行填入妙算3的 Tailnet 地址和机载部署目录。如使用其他 SSH 别名，同步修改 `--ssh-host`。
 
 ```bash
+tailnet_host=MANIFOLD_TAILNET_IP
+remote_root=/absolute/path/to/onboard-deployment
 bash scripts/start_l3_preview_4g.sh \
-  --host MANIFOLD_TAILNET_IP --ssh-host l3-manifold --seconds 180 \
-  --remote-root /absolute/path/to/updated/onboard-deployment \
-  --expected-source 1 --yolo-engine /absolute/path/yolox_s.fp16.engine
+  --host "$tailnet_host" --ssh-host l3-manifold \
+  --remote-root "$remote_root" \
+  --yolo-engine "$remote_root/yolox_s.fp16.engine" \
+  --start-yolo --seconds 300
 ```
 
-- 默认关闭 YOLO，转发原始 H.264。点击“开启 YOLO”后，妙算3对可见光画面运行人员检测、画框并硬编码 1920×1080 H.264。检测输入为 640×640，视频回传仍用 TCP 9102。
+如果 L3 当前显示二维点云画面，程序会先切到可见光。PC 收到可见光首帧后自动开启 YOLO。按 **Esc** 或在启动终端按 **Ctrl+C** 停止预览。
+
+- 省略 `--start-yolo` 时，预览以相机原始 H.264 启动，可以在窗口点击“开启 YOLO”。妙算3对可见光运行人员检测、画框并硬件编码 1920×1080 H.264。检测输入为 640×640，视频回传仍用 TCP 9102。
 - 处理后的码率默认 4 Mbps，可用 `--yolo-bitrate` 指定 bit/s。点击“关闭 YOLO”后恢复相机原码流。按钮在本机解出新模式的首帧后更新。
-- YOLO 开关只对源 `1` 可用。要切到二维点云画面，先关闭 YOLO。按 **Esc** 停止预览。
-- 启动命令加 `--start-yolo` 后，窗口会在收到可见光首帧后自动开启 YOLO。如果启动时 SSH 握手超时，程序会重试一次，仍未连通时在窗口中显示原因。
+- 要切到二维点云画面，先关闭 YOLO。
+- 如果启动时 SSH 握手超时，程序会重试一次，仍未连通时在窗口中显示原因。
 
 ## 实机验证和当前限制
 
