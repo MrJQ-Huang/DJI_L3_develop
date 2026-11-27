@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Manifold 3: original PSDK H.264 -> TCP. No encoder, media files or ROS.
+# Manifold 3: PSDK H.264 -> TCP, with optional on-device YOLO overlay.
 # The native app reads an allowlist of preview commands from stdin.
 set -euo pipefail
 umask 077
@@ -10,19 +10,22 @@ mount=1
 video_port=9102
 expected_source=
 fast_switch=()
+yolo_engine=
+yolo_bitrate=4000000
 while (($#)); do
     case "$1" in
         --help|-h)
-            echo 'Usage: run_l3_preview_onboard.sh --bin-dir DIR --config PRIVATE_FILE [--seconds 60] [--mount 1] [--expected-source ID] [--video-port 9102] [--fast-switch]'
+            echo 'Usage: run_l3_preview_onboard.sh --bin-dir DIR --config PRIVATE_FILE [--seconds 60] [--mount 1] [--expected-source ID] [--video-port 9102] [--fast-switch] [--yolo-engine FILE] [--yolo-bitrate BPS]'
             exit 0 ;;
         --fast-switch) fast_switch=(--fast-switch); shift ;;
-        --bin-dir|--config|--seconds|--mount|--expected-source|--video-port)
+        --bin-dir|--config|--seconds|--mount|--expected-source|--video-port|--yolo-engine|--yolo-bitrate)
             (($# >= 2)) || { echo "missing value: $1" >&2; exit 2; }
             option=$1; value=$2; shift 2
             case "$option" in
                 --bin-dir) bin_dir=$value ;; --config) config=$value ;;
                 --seconds) seconds=$value ;; --mount) mount=$value ;;
                 --video-port) video_port=$value ;; --expected-source) expected_source=$value ;;
+                --yolo-engine) yolo_engine=$value ;; --yolo-bitrate) yolo_bitrate=$value ;;
             esac ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
@@ -40,6 +43,15 @@ source_args=()
 if [[ -n "$expected_source" ]]; then
     [[ "$expected_source" =~ ^(0|[1-9][0-9]{0,2})$ ]] && ((expected_source <= 255)) || exit 2
     source_args=(--expected-source "$expected_source")
+fi
+if [[ -n "$yolo_engine" ]]; then
+    repo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+    yolo_worker="$repo_dir/onboard/l3_yolo_worker.py"
+    [[ "$yolo_engine" = /* && -f "$yolo_engine" && -r "$yolo_engine" && -x "$yolo_worker" ]] || {
+        echo 'event=preview_failed reason=missing_yolo_worker_or_engine' >&2; exit 2;
+    }
+    fast_switch=(--fast-switch)
+    source_args+=(--yolo-worker "$yolo_worker" --yolo-engine "$yolo_engine" --yolo-bitrate "$yolo_bitrate")
 fi
 command -v timeout >/dev/null
 command -v flock >/dev/null

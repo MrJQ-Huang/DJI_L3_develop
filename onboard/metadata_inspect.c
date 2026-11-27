@@ -42,6 +42,7 @@
 #include "l3_video_control.h"
 #include "l3_usb_padding.h"
 #include "l3_osal.h"
+#include "l3_yolo_pipe.h"
 #include "osal/osal.h"
 #include "osal/osal_fs.h"
 #if L3_USE_OFFICIAL_SOCKET
@@ -107,6 +108,7 @@ static void usage(void)
          "         [--expected-source ID (video-only; no source writes)]\n"
          "         [--video-control-stdin (video-only; explicit source writes)]\n"
          "         [--fast-switch (video control; keep the SDK session open)]\n"
+         "         [--yolo-worker PATH --yolo-engine PATH --yolo-bitrate BPS]\n"
          "\n"
          "No arguments/--help: no configuration read or SDK initialization.\n"
          "--check-config: validate owner-only regular 0600 file; no SDK calls.\n"
@@ -887,11 +889,18 @@ static int run_point_probe(E_DjiMountPosition mount, unsigned int seconds, L3p1T
 typedef struct {
     L3Stream *stream;
     atomic_bool video_failed;
+    L3YoloPipe *yolo;
+    /* Change the route and worker pointer only after the input callbacks drain. */
+    bool yolo_active;
 } LiveStreamContext;
 
 static void publish_video(const uint8_t *bytes, uint32_t size, void *opaque)
 {
     LiveStreamContext *context = opaque;
+    if (context->yolo_active) {
+        (void)l3_yolo_pipe_enqueue(context->yolo, bytes, size);
+        return;
+    }
     if (!l3_stream_publish_h264(context->stream, bytes, size)) atomic_store(&context->video_failed, true);
 }
 
@@ -986,6 +995,12 @@ typedef enum {
 } VideoSwitchPhase;
 
 typedef struct {
+    const char *worker;
+    const char *engine;
+    unsigned int bitrate;
+} YoloConfig;
+
+typedef struct {
     char line[32];
     size_t used;
     bool discard;
@@ -993,12 +1008,51 @@ typedef struct {
     VideoSwitchPhase phase;
     int source;
     int64_t switch_ms;
+    const YoloConfig *yolo_config;
+    bool yolo_starting;
+    bool want_yolo;
 } VideoCommand;
+
+static void change_yolo_route(VideoCommand *input, int source, bool enabled)
+{
+    input->source = source;
+    input->want_yolo = enabled;
+    input->switch_ms = point_now_ms();
+    input->phase = VIDEO_STOP_FOR_SWITCH;
+    printf("event=yolo phase=switch target=%s\n", enabled ? "on" : "off");
+}
+
+static void request_yolo(VideoCommand *input, LiveStreamContext *context, E_DjiMountPosition mount, bool enable)
+{
+    if (!input->yolo_config || input->phase != VIDEO_ACTIVE || input->yolo_starting ||
+        context->yolo_active == enable) {
+        puts("event=yolo phase=refused reason=unavailable_or_busy");
+        return;
+    }
+    L3VideoControlResult source = l3_video_source_read(mount);
+    if (!source.confirmed || (enable && source.current_source != L3_VIDEO_SOURCE_VISIBLE)) {
+        puts("event=yolo phase=refused reason=visible_source_required");
+        return;
+    }
+    if (!enable) {
+        change_yolo_route(input, source.current_source, false);
+        return;
+    }
+    const YoloConfig *cfg = input->yolo_config;
+    context->yolo = l3_yolo_pipe_start(cfg->worker, cfg->engine, cfg->bitrate);
+    if (!context->yolo) {
+        printf("event=yolo phase=refused reason=worker_start_failed errno=%d\n", errno);
+        return;
+    }
+    input->yolo_starting = true;
+    input->switch_ms = point_now_ms();
+    puts("event=yolo phase=starting");
+}
 
 /* One bounded input read per iteration; never interpret stdin as shell or SDK
  * packets. L3's actual camera sources are 1 (wide visible) and 14 (2D points).
  * These IDs must NOT be passed as Liveview source arguments. */
-static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3Stream *stream)
+static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, LiveStreamContext *context)
 {
     struct pollfd fd = {.fd = STDIN_FILENO, .events = POLLIN};
     if (poll(&fd, 1, 0) <= 0) return false;
@@ -1016,14 +1070,20 @@ static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3
         input->line[input->used] = '\0';
         if (!input->discard && strcmp(input->line, "stop") == 0) return true;
         if (!input->discard && strcmp(input->line, "status") == 0 && input->phase == VIDEO_ACTIVE) {
-            video_control_event("status", -1, l3_video_source_read(mount), false);
+            L3VideoControlResult source = l3_video_source_read(mount);
+            video_control_event("status", -1, source, false);
+            if (context->yolo_active && (!source.confirmed || source.current_source != L3_VIDEO_SOURCE_VISIBLE))
+                input->phase = VIDEO_FALLBACK;
+        } else if (!input->discard && (strcmp(input->line, "yolo on") == 0 ||
+                                      strcmp(input->line, "yolo off") == 0)) {
+            request_yolo(input, context, mount, strcmp(input->line, "yolo on") == 0);
         } else if (!input->discard && strcmp(input->line, "resume") == 0 && input->phase == VIDEO_WAIT_RESUME) {
             /* The PC has joined its old receiver before sending resume. Drop
              * any sockets its retry loop opened before that join. */
-            l3_stream_reset_video(stream);
+            l3_stream_reset_video(context->stream);
             input->phase = VIDEO_WAIT_CLIENT;
             puts("event=fast_switch phase=video_relisten");
-        } else if (!input->discard && input->phase == VIDEO_ACTIVE &&
+        } else if (!input->discard && input->phase == VIDEO_ACTIVE && !input->yolo_starting && !context->yolo_active &&
                    (strcmp(input->line, "visible") == 0 || strcmp(input->line, "point") == 0)) {
             unsigned int source = strcmp(input->line, "visible") == 0 ?
                                   L3_VIDEO_SOURCE_VISIBLE : L3_VIDEO_SOURCE_POINT_CLOUD;
@@ -1039,7 +1099,7 @@ static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3
                 input->source = result.current_source;
                 input->phase = result.current_source < 0 ? VIDEO_FALLBACK : VIDEO_STOP_FOR_SWITCH;
             } else if (changed) {
-                l3_stream_reset_video(stream);
+                l3_stream_reset_video(context->stream);
                 T_DjiReturnCode keyframe = DjiLiveview_RequestIntraframeFrameData(
                     (E_DjiLiveViewCameraPosition)mount, DJI_LIVEVIEW_CAMERA_SOURCE_DEFAULT);
                 sdk_result("video_control_keyframe", keyframe);
@@ -1054,6 +1114,32 @@ static bool poll_video_command(VideoCommand *input, E_DjiMountPosition mount, L3
     return false;
 }
 
+static bool pump_yolo(VideoCommand *input, E_DjiMountPosition mount, LiveStreamContext *context, int64_t now)
+{
+    if (input->yolo_starting) {
+        int ready = l3_yolo_pipe_ready(context->yolo);
+        if (ready == 0 && now - input->switch_ms < 10000) return true;
+        input->yolo_starting = false;
+        if (ready == 1 && check_video_source(mount, L3_VIDEO_SOURCE_VISIBLE)) {
+            change_yolo_route(input, L3_VIDEO_SOURCE_VISIBLE, true);
+        } else {
+            l3_yolo_pipe_stop(context->yolo);
+            context->yolo = NULL;
+            puts("event=yolo phase=refused reason=worker_start_or_source_failed");
+        }
+    }
+    if (input->phase != VIDEO_ACTIVE || !context->yolo_active) return true;
+    if (!l3_yolo_pipe_flush(context->yolo)) return false;
+    uint8_t buffer[65536];
+    for (int i = 0; i < 8; ++i) {
+        ssize_t count = l3_yolo_pipe_read(context->yolo, buffer, sizeof(buffer));
+        if (count < 0) return false;
+        if (count == 0) return true;
+        if (!l3_stream_publish_h264(context->stream, buffer, (size_t)count)) return false;
+    }
+    return true;
+}
+
 static bool advance_video_switch(VideoCommand *input, E_DjiMountPosition mount,
                                  LiveStreamContext *context, unsigned int *previous_clients)
 {
@@ -1061,6 +1147,11 @@ static bool advance_video_switch(VideoCommand *input, E_DjiMountPosition mount,
     if (input->phase == VIDEO_FALLBACK) return false;
     if (input->phase == VIDEO_STOP_FOR_SWITCH) {
         if (!sdk_result("fast_video_stop", l3_rgb_probe_stop())) return false;
+        context->yolo_active = input->want_yolo;
+        if (!context->yolo_active) {
+            l3_yolo_pipe_stop(context->yolo);
+            context->yolo = NULL;
+        }
         if (!check_video_source(mount, (unsigned int)input->source)) return false;
         input->phase = VIDEO_WAIT_RESUME;
         printf("event=fast_switch phase=old_stopped elapsed_ms=%" PRId64 "\n",
@@ -1085,7 +1176,8 @@ static bool advance_video_switch(VideoCommand *input, E_DjiMountPosition mount,
 
 static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
                            const char *bind_ip, unsigned int point_port, unsigned int video_port,
-                           L3StreamMode mode, int expected_source, bool video_control, bool fast_switch)
+                           L3StreamMode mode, int expected_source, bool video_control, bool fast_switch,
+                           const YoloConfig *yolo_config)
 {
     bool with_video = mode != L3_STREAM_POINTS;
     bool with_points = mode != L3_STREAM_VIDEO;
@@ -1162,20 +1254,22 @@ static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
         int64_t begin = point_now_ms();
         if (begin < 0) goto finish;
         int64_t deadline = begin + (int64_t)seconds * 1000, next_report = begin;
-        VideoCommand input = {.fast = fast_switch};
+        VideoCommand input = {.fast = fast_switch, .yolo_config = yolo_config};
         unsigned int previous_clients = 0;
         if (video_control) video_control_event("status", -1, l3_video_source_read(mount), false);
+        if (yolo_config) puts("event=yolo phase=available");
         printf("event=stream phase=begin streams=video seconds=%u point_port=%u video_port=%u recording_start=no\n",
                seconds, point_port, video_port);
         while (!stop_requested) {
             int64_t now = point_now_ms();
             if (now < 0) goto finish;
             if (now >= deadline) { status = 0; break; }
-            if (video_control && poll_video_command(&input, mount, context->stream)) {
+            if (video_control && poll_video_command(&input, mount, context)) {
                 status = 0;
                 break;
             }
-            if (!advance_video_switch(&input, mount, context, &previous_clients)) {
+            if (!pump_yolo(&input, mount, context, now) ||
+                !advance_video_switch(&input, mount, context, &previous_clients)) {
                 puts("event=fast_switch phase=video_fallback");
                 status = 0; /* Only retry after the cleanup below succeeds. */
                 break;
@@ -1183,7 +1277,7 @@ static int run_live_stream(E_DjiMountPosition mount, unsigned int seconds,
             if (now >= next_report) {
                 L3StreamStats stats;
                 l3_stream_stats(context->stream, &stats);
-                if (input.phase == VIDEO_ACTIVE && stats.video_clients > previous_clients) {
+                if (input.phase == VIDEO_ACTIVE && !context->yolo_active && stats.video_clients > previous_clients) {
                     /* A remote viewer can join after the encoder's initial IDR.
                      * Ask for a fresh keyframe without changing source/bitrate. */
                     sdk_result("video_join_keyframe", DjiLiveview_RequestIntraframeFrameData(
@@ -1212,6 +1306,7 @@ finish:
             _exit(3);
         }
     }
+    l3_yolo_pipe_stop(context->yolo);
     if (liveview_initialized && !sdk_result("stream_liveview_deinit", DjiLiveview_Deinit())) status = 1;
     L3StreamStats stats;
     l3_stream_stats(context->stream, &stats);
@@ -1234,6 +1329,7 @@ int main(int argc, char **argv)
     bool video_info = false;
     bool video_control = false;
     bool fast_switch = false;
+    YoloConfig yolo = {0};
     int expected_source = -1;
     bool camera_firmware = false;
     const char *streams = NULL;
@@ -1265,6 +1361,13 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--video-info") == 0 && !video_info) video_info = true;
         else if (strcmp(argv[i], "--video-control-stdin") == 0 && !video_control) video_control = true;
         else if (strcmp(argv[i], "--fast-switch") == 0 && !fast_switch) fast_switch = true;
+        else if (strcmp(argv[i], "--yolo-worker") == 0 && yolo.worker == NULL && i + 1 < argc)
+            yolo.worker = argv[++i];
+        else if (strcmp(argv[i], "--yolo-engine") == 0 && yolo.engine == NULL && i + 1 < argc)
+            yolo.engine = argv[++i];
+        else if (strcmp(argv[i], "--yolo-bitrate") == 0 && !yolo.bitrate && i + 1 < argc) {
+            if (!parse_number(argv[++i], 500000U, 25000000U, &yolo.bitrate)) return 2;
+        }
         else if (strcmp(argv[i], "--expected-source") == 0 && expected_source < 0 && i + 1 < argc) {
             unsigned int value;
             if (!parse_number(argv[++i], 0U, 255U, &value)) return 2;
@@ -1309,7 +1412,10 @@ int main(int argc, char **argv)
                               (unsigned int)rgb_probe + (unsigned int)point_probe + (unsigned int)stop_pointcloud +
                               (unsigned int)stream + (unsigned int)sdk_diagnostic + (unsigned int)camera_firmware +
                               (unsigned int)video_info;
+    bool use_yolo = yolo.worker != NULL || yolo.engine != NULL || yolo.bitrate != 0;
     if (config == NULL || mode_count != 1U ||
+        (use_yolo && (!fast_switch || !yolo.worker || yolo.worker[0] != '/' ||
+                      !yolo.engine || yolo.engine[0] != '/' || !yolo.bitrate)) ||
         (expected_source >= 0 && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
         (video_control && (!stream || streams == NULL || strcmp(streams, "video") != 0)) ||
         (fast_switch && !video_control) ||
@@ -1426,7 +1532,7 @@ int main(int argc, char **argv)
         else if (streams != NULL && strcmp(streams, "video") == 0) stream_mode = L3_STREAM_VIDEO;
         status = run_live_stream((E_DjiMountPosition)selected_mount,
                                  probe_seconds, bind_ip, point_port, video_port, stream_mode, expected_source,
-                                 video_control, fast_switch);
+                                 video_control, fast_switch, use_yolo ? &yolo : NULL);
     }
     if (stop_pointcloud && status == 0) {
         puts("event=point_probe phase=emergency_stop_begin start_attempted=no mop_initialized=no blocking=yes");

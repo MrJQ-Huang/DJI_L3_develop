@@ -96,7 +96,7 @@ if(BUILD_TESTING)
     # explicit stubs in the test. No vendor binary or hardware I/O is linked.
     target_link_options(test_diagnostic_modes PRIVATE -Wl,--gc-sections)
     target_link_libraries(test_diagnostic_modes PRIVATE l3_stream Threads::Threads)
-    target_sources(test_diagnostic_modes PRIVATE l3_video_control.c)
+    target_sources(test_diagnostic_modes PRIVATE l3_video_control.c l3_yolo_pipe.c)
     add_test(NAME diagnostic_modes COMMAND test_diagnostic_modes)
     set_tests_properties(diagnostic_modes PROPERTIES TIMEOUT 10)
     add_executable(test_video_control tests/test_video_control.c l3_video_control.c)
@@ -124,6 +124,7 @@ add_executable(l3_metadata_inspect
     ${L3_SOCKET_SOURCE}
     l3_rgb_probe.c
     l3_video_control.c
+    l3_yolo_pipe.c
     l3_usb_padding.c
     l3_osal.c
     l3_point_probe_controller.c

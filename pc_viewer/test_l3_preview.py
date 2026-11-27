@@ -195,6 +195,57 @@ class PreviewControlTests(unittest.TestCase):
             self.assertEqual(factory.call_args.args[0].expected_source, 14)
             new.start.assert_called_once()
 
+    def test_yolo_modes_wait_for_fresh_frames_and_keep_the_same_source_and_port(self):
+        args = arguments(["--host", "127.0.0.1", "--no-display", "--seconds", "60",
+                          "--yolo-engine", "/tmp/YOLOX s.engine"])
+        remote = shlex.split(ssh_command(args)[-1])
+        self.assertIn("--fast-switch", remote)
+        self.assertEqual(remote[remote.index("--yolo-engine") + 1], args.yolo_engine)
+        with patch("l3_preview.PreviewSession") as factory, patch("l3_preview.StreamReceiver") as receivers:
+            session = factory.return_value
+            session.ready, session.finished = threading.Event(), threading.Event()
+            session.ready.set()
+            session.lock = threading.Lock()
+            state = session.state = PreviewState(current=14)
+            state.apply(parse_event("event=yolo phase=available"))
+            session.send.return_value = True
+            session.snapshot.side_effect = lambda: PreviewState(**vars(state))
+            app = PreviewApp(args)
+            app.toggle_yolo()
+            session.send.assert_not_called()
+            state.current = app.active_source = 1
+            first = Mock()
+            first.stats.return_value = {"video_frames": 10}
+            app.receiver = first
+
+            for target in (True, False):
+                app.toggle_yolo()
+                session.send.assert_called_with("yolo on" if target else "yolo off")
+                state.yolo_pending = True
+                mode = "on" if target else "off"
+                state.apply(parse_event(f"event=yolo phase=switch target={mode}"))
+                app.tick()
+                session.send.assert_called_with("resume")
+                self.assertEqual(app.yolo_active, not target)
+                self.assertIsNone(app.receiver)
+                state.apply(parse_event("event=fast_switch phase=video_relisten"))
+                receiver = Mock()
+                receivers.return_value.start.return_value = receiver
+                receiver.latest_video.return_value = None
+                receiver.stats.return_value = {"video_frames": 1, "video_disconnects": 0}
+                app.tick()
+                self.assertEqual(app.yolo_active, not target)
+                receiver.latest_video.return_value = SimpleNamespace(sequence=1, received_monotonic_ns=time.monotonic_ns(),
+                                                                    image=SimpleNamespace(shape=(1080, 1920, 3)))
+                app.tick()
+                self.assertEqual(app.yolo_active, target)
+                self.assertFalse(state.yolo_pending)
+                self.assertEqual(state.current, 1)
+                self.assertEqual(receivers.call_args.kwargs["video_port"], 9102)
+                self.assertEqual(app.can_switch(state), not target)
+            first.stop.assert_called_once()
+            factory.assert_called_once()
+
     def test_rejected_switch_keeps_actual_source_and_message(self):
         state = PreviewState(current=14, pending=True)
         state.apply(parse_event("event=video_control action=switch requested=1 current=14 "

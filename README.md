@@ -31,12 +31,35 @@ bash scripts/start_l3_preview_4g.sh \
 
 切换时保留上一帧，等待新源首帧。模式会在原 SDK 会话内停止并重新订阅 Liveview，建立新的视频 TCP 连接。若重订阅失败或等待首帧超时，在机载进程清理并正常退出后回退到完整重连。
 
+## 机载 YOLO 人员检测
+
+在妙算3的独立部署目录构建同版本的机载程序，并保留该目录下的 `onboard/` 和 `scripts/`。通过有线 SSH 上传构建所需文件和 [官方 YOLOX-s ONNX](https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx)，在目标妙算3上生成 TensorRT FP16 引擎。妙算需要 TensorRT 8.x、CUDA 11、Python 3 的 TensorRT、OpenCV、NumPy 和 GStreamer GI 绑定，以及 NVIDIA 的 `nvv4l2decoder`、`nvvidconv` 和 `nvv4l2h264enc` 插件。
+
+```bash
+/usr/src/tensorrt/bin/trtexec --onnx=/absolute/path/yolox_s.onnx \
+  --saveEngine=/absolute/path/yolox_s.fp16.engine --fp16 --skipInference
+```
+
+有线部署完成后，用机载 4G 上的 Tailscale 地址验收。先让 L3 处于可见光源，再从 PC 启动。
+
+```bash
+bash scripts/start_l3_preview_4g.sh \
+  --host MANIFOLD_TAILNET_IP --ssh-host l3-manifold --seconds 180 \
+  --remote-root /absolute/path/to/updated/onboard-deployment \
+  --expected-source 1 --yolo-engine /absolute/path/yolox_s.fp16.engine
+```
+
+- 默认关闭 YOLO，转发原始 H.264。点击“开启 YOLO”后，妙算3对可见光画面运行人员检测、画框并硬编码 1920×1080 H.264。检测输入为 640×640，视频回传仍用 TCP 9102。
+- 处理后的码率默认 4 Mbps，可用 `--yolo-bitrate` 指定 bit/s。点击“关闭 YOLO”后恢复相机原码流。按钮在本机解出新模式的首帧后更新。
+- YOLO 开关只对源 `1` 可用。要切到二维点云画面，先关闭 YOLO。按 **Esc** 停止预览。
+
 ## 实机验证和当前限制
 
 | 项目 | 状态 |
 | --- | --- |
 | 可见光和二维点云画面切换 | 2026-11-17 实机完成 `14 → 1 → 14 → 1 → 14`，每段收到至少 30 帧新的 1920×1080 画面。 |
 | 机载 4G 回传 | 2026-11-18 的预览会话实际解码 2,995 帧 1920×1080 视频，包含 3 次重订阅，机载程序正常退出。长时间稳定回传仍待验收。 |
+| 机载 YOLO 人员检测 | 本机已用软件编解码回放验证 1080p 画框，并用合成首帧测试预览开关。妙算3硬件编解码、推理速度和带框画面的 4G 回传待实机验收。 |
 | 实时 XYZ 激光点云 | 尚未取得有效点包。录制启动和 MOP 49154 连接成功后，`RecvData` 返回 `0x0000000f00000001` 或阻塞。详见[故障记录](docs/dji-support-2026-11-17/README.md)。 |
 | ROS 2 `PointCloud2` / RViz | 桥接与机载 4G 通路已用合成点流验证。真实 XYZ 接入仍依赖 L3 输出有效点包。 |
 
@@ -49,7 +72,7 @@ bash scripts/start_l3_preview_4g.sh \
 | 路径 | 用途 |
 | --- | --- |
 | [onboard/](onboard/README.md) | 妙算3 PSDK 应用、L3 预览与点云诊断、TCP 分发 |
-| [pc_viewer/l3_preview.py](pc_viewer/l3_preview.py) | 4G 高清预览窗口、切源控制与断线恢复 |
+| [pc_viewer/l3_preview.py](pc_viewer/l3_preview.py) | 4G 高清预览窗口、切源、YOLO 开关与断线恢复 |
 | [pc_viewer/l3_ros_bridge.py](pc_viewer/l3_ros_bridge.py) | ROS 2 图像和点云桥接 |
 | [android/](android/L3ReadOnlyActivity.kt) 和 [pc_viewer/receiver.py](pc_viewer/receiver.py) | 早期 DJI RC Plus 2 / MSDK 可见光实验及 USB 接收器，操作步骤见 [Linux 环境](docs/LINUX_SETUP.md#a-地面电脑先复现-rgb不急着安装-ros-或-android-studio) |
 | [HANDOFF.md](HANDOFF.md) 和 [AGENTS.md](AGENTS.md) | 工程交接、验收证据及实机操作范围 |

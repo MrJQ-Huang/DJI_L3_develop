@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manifold-only HD video window. Forward original H.264; never start recording."""
+"""Manifold-only HD video window with optional on-device person detection."""
 from __future__ import annotations
 
 import argparse
@@ -28,8 +28,24 @@ class PreviewState:
     resubscribes: int = 0
     relistens: int = 0
     fast_fallback: bool = False
+    yolo_available: bool = False
+    yolo_pending: bool = False
+    yolo_target: bool | None = None
 
     def apply(self, event: dict[str, str]) -> None:
+        if event.get("event") == "yolo":
+            phase = event.get("phase")
+            if phase == "available":
+                self.yolo_available = True
+            elif phase == "starting":
+                self.message = "正在加载机载 YOLO 模型…"
+            elif phase == "switch" and event.get("target") in ("on", "off"):
+                self.yolo_target = event["target"] == "on"
+                self.resubscribes += 1
+            elif phase == "refused":
+                self.yolo_pending = False
+                self.message = "YOLO 切换失败：" + event.get("reason", "未知错误")
+            return
         if event.get("event") == "fast_switch":
             if event.get("phase") == "video_relisten":
                 self.relistens += 1
@@ -79,6 +95,8 @@ def ssh_command(args) -> list[str]:
         remote += ["--expected-source", str(args.expected_source)]
     if args.fast_switch:
         remote.append("--fast-switch")
+    if args.yolo_engine:
+        remote += ["--yolo-engine", args.yolo_engine, "--yolo-bitrate", str(args.yolo_bitrate)]
     command = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
     if args.identity:
@@ -135,22 +153,29 @@ class PreviewSession:
             self.finished.set()
 
     def send(self, command: str) -> bool:
-        if command not in ("status", "visible", "point", "resume", "stop"):
+        if command not in ("status", "visible", "point", "resume", "stop", "yolo on", "yolo off"):
             raise ValueError("unknown preview command")
         with self.lock:
             if self.process is None or self.process.poll() is not None:
                 return False
             if command in ("visible", "point"):
-                if self.state.pending or self.state.current not in SOURCE_NAMES:
+                if self.state.pending or self.state.yolo_pending or self.state.current not in SOURCE_NAMES:
                     return False
                 self.state.pending = True
                 self.state.message = "正在等待设备确认切换…"
+            if command in ("yolo on", "yolo off"):
+                if (not self.state.yolo_available or self.state.yolo_pending or self.state.pending or
+                        self.state.current != 1):
+                    return False
+                self.state.yolo_pending = True
+                self.state.message = "正在等待妙算3确认 YOLO 切换…"
             try:
                 self.process.stdin.write(command + "\n")
                 self.process.stdin.flush()
                 return True
             except (OSError, ValueError):
                 self.state.pending = False
+                self.state.yolo_pending = False
                 self.state.message = "控制连接已断开"
                 return False
 
@@ -193,6 +218,8 @@ class PreviewApp:
         self.resubscribes = 0
         self.relisten_target = 0
         self.switch_started = None
+        self.yolo_started = None
+        self.yolo_active = False
         self.awaiting_switch_frame = False
         self.last_frame_ns = None
         self.final_frame_age = None
@@ -213,6 +240,9 @@ class PreviewApp:
             ttk.Label(bar, textvariable=self.source_text).pack(side="left")
             self.toggle = ttk.Button(bar, text="切换画面", command=self.switch, state="disabled")
             self.toggle.pack(side="right", padx=6)
+            if args.yolo_engine:
+                self.yolo_button = ttk.Button(bar, text="开启 YOLO", command=self.toggle_yolo, state="disabled")
+                self.yolo_button.pack(side="right", padx=6)
             ttk.Button(bar, text="停止预览", command=self.close).pack(side="right")
             self.message_text = tk.StringVar(value="正在连接妙算3…")
             ttk.Label(self.root, textvariable=self.message_text, padding=(10, 4)).pack(fill="x")
@@ -249,17 +279,31 @@ class PreviewApp:
             print(json.dumps({"event": "hd_fast_fallback", "source": source}), flush=True)
         self.restart_source = source if fast_failed or source is not None else self.active_source
         self.awaiting_switch_frame = self.switch_started is not None
+        self.yolo_started = None
         self.stop_receiver()
         self.session.send("stop")
         with self.session.lock:
             self.session.state.message = ("正在切换画面，重新订阅原始高清流…" if source is not None else
                                           "视频连接中断，正在重新订阅原始高清流…")
 
-    def can_switch(self, state):
+    def can_control(self, state):
         return (not self.recovering and self.fast_deadline is None and not self.awaiting_switch_frame and
-                self.resubscribes == state.resubscribes and not state.pending and self.session.ready.is_set() and
+                self.resubscribes == state.resubscribes and not state.pending and not state.yolo_pending and
+                self.session.ready.is_set() and
                 not self.session.finished.is_set() and state.current in SOURCE_NAMES and
                 time.monotonic() - self.started < self.args.seconds - 10)
+
+    def can_switch(self, state):
+        return not self.yolo_active and self.can_control(state)
+
+    def can_toggle_yolo(self, state):
+        return (state.yolo_available and state.current == 1 and self.can_control(state) and
+                (self.yolo_active or time.monotonic() - self.started < self.args.seconds - 20))
+
+    def toggle_yolo(self):
+        state = self.session.snapshot()
+        if self.can_toggle_yolo(state) and self.session.send("yolo off" if self.yolo_active else "yolo on"):
+            self.yolo_started = time.monotonic()
 
     def switch(self):
         state = self.session.snapshot()
@@ -306,6 +350,9 @@ class PreviewApp:
             self.message_text.set("正在等待新画面…" if self.fast_deadline is not None else state.message)
             self.toggle.configure(text="切到可见光" if state.current == 14 else "切到点云画面",
                                   state="normal" if self.can_switch(state) else "disabled")
+            if self.args.yolo_engine:
+                self.yolo_button.configure(text="关闭 YOLO" if self.yolo_active else "开启 YOLO",
+                                           state="normal" if self.can_toggle_yolo(state) else "disabled")
         if (self.session.ready.is_set() and self.receiver is None and not self.recovering and
                 self.fast_deadline is None):
             self.generation = state.generation
@@ -350,7 +397,16 @@ class PreviewApp:
                     self.fast_deadline = self.switch_started = None
                     self.awaiting_switch_frame = False
                     with self.session.lock:
-                        if self.session.state.message == "设备已确认画面源，等待新视频帧":
+                        if state.yolo_pending and state.yolo_target is not None:
+                            self.yolo_active = state.yolo_target
+                            self.session.state.yolo_pending = False
+                            self.session.state.yolo_target = None
+                            self.session.state.message = "妙算3 YOLO 人员检测" if self.yolo_active else "原始 H.264 回传"
+                            print(json.dumps({"event": "hd_yolo_frame", "active": self.yolo_active,
+                                              "seconds": round(now - self.yolo_started, 3) if self.yolo_started is not None else None,
+                                              "dimensions": list(video.image.shape[:2])}), flush=True)
+                            self.yolo_started = None
+                        elif self.session.state.message == "设备已确认画面源，等待新视频帧":
                             self.session.state.message = "原始 H.264 回传"
             if now - self.last_report >= 1:
                 elapsed = now - self.last_report
@@ -360,20 +416,21 @@ class PreviewApp:
                 age = (time.monotonic_ns() - video.received_monotonic_ns) / 1e9 if video is not None else 0
                 stale = f" · {age:.1f}s 未收到新帧" if age > 2 else ""
                 if self.root:
-                    self.metrics_text.set(f"{dimensions} · 接收 {mbps:.1f} Mbps · 解码 {fps:.1f} fps · 原码流回传{stale}")
+                    mode = "机载 YOLO" if self.yolo_active else "原码流回传"
+                    self.metrics_text.set(f"{dimensions} · 接收 {mbps:.1f} Mbps · 解码 {fps:.1f} fps · {mode}{stale}")
                 print(json.dumps({"event": "hd_stats", "source": state.current, "dimensions": dimensions,
-                                  "mbps": round(mbps, 2), "fps": round(fps, 2), **stats}), flush=True)
+                                  "mbps": round(mbps, 2), "fps": round(fps, 2), "yolo": self.yolo_active, **stats}), flush=True)
                 self.previous_bytes, self.previous_frames = stats["video_bytes"], stats["video_frames"]
                 self.last_report = now
             # The device resets video before its switch ACK reaches SSH. Let
             # that ACK establish the actual source before choosing a restart.
-            if (stats["video_disconnects"] > 0 and not state.pending and self.fast_deadline is None and
+            if (stats["video_disconnects"] > 0 and not state.pending and not state.yolo_pending and self.fast_deadline is None and
                     not self.session.finished.is_set()):
                 self.request_recovery(now)
         if (self.switch_started is not None and not state.pending and not self.awaiting_switch_frame and
                 state.current == self.active_source):
             self.switch_started = None
-        if (now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and
+        if (now - self.last_status >= 3 and self.session.ready.is_set() and not state.pending and not state.yolo_pending and
                 not self.recovering and self.fast_deadline is None):
             self.session.send("status")
             self.last_status = now
@@ -384,6 +441,9 @@ class PreviewApp:
                 session_args = argparse.Namespace(**vars(self.args))
                 session_args.seconds = remaining
                 session_args.fast_switch = self.fast_available
+                if not self.fast_available:
+                    session_args.yolo_engine = None
+                self.yolo_active = False
                 # A switch result can arrive while the old session drains.
                 # Its final readback takes precedence over the earlier snapshot.
                 final_source = self.session.snapshot().current
@@ -457,6 +517,8 @@ def arguments(argv=None):
     parser.add_argument("--video-port", type=int, default=9102)
     parser.add_argument("--expected-source", type=int)
     parser.add_argument("--fast-switch", action="store_true", help="Try in-process video resubscription")
+    parser.add_argument("--yolo-engine", help="Absolute path to the Manifold YOLOX-s TensorRT engine")
+    parser.add_argument("--yolo-bitrate", type=int, default=4000000, help="Annotated H.264 bitrate in bit/s")
     parser.add_argument("--no-display", action="store_true")
     args = parser.parse_args(argv)
     if (not 1 <= args.seconds <= 300 or args.mount not in (1, 2, 3) or
@@ -465,6 +527,10 @@ def arguments(argv=None):
             not args.remote_root.startswith("/") or not args.remote_config.startswith("/") or
             args.expected_source is not None and not 0 <= args.expected_source <= 255):
         parser.error("invalid duration, mount, port, host, source or absolute remote path")
+    if args.yolo_engine is not None and (not args.yolo_engine.startswith("/") or
+                                         not 500000 <= args.yolo_bitrate <= 25000000):
+        parser.error("YOLO requires an absolute engine path and a bitrate of 500000..25000000")
+    args.fast_switch = args.fast_switch or args.yolo_engine is not None
     args.socks5 = args.socks5 or None
     # Validate networking/decode prerequisites before starting the remote SDK.
     try:
