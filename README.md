@@ -33,11 +33,13 @@ bash scripts/start_l3_preview_4g.sh \
 
 ## 机载 YOLO 人员检测
 
-在妙算3的独立部署目录构建同版本的机载程序，并保留该目录下的 `onboard/` 和 `scripts/`。通过有线 SSH 上传构建所需文件和 [官方 YOLOX-s ONNX](https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx)，在目标妙算3上生成 TensorRT FP16 引擎。妙算需要 TensorRT 8.x、CUDA 11、Python 3 的 TensorRT、OpenCV、NumPy 和 GStreamer GI 绑定，以及 NVIDIA 的 `nvv4l2decoder`、`nvvidconv` 和 `nvv4l2h264enc` 插件。
+在妙算3的独立部署目录构建同版本的机载程序，并保留该目录下的 `onboard/` 和 `scripts/`。通过有线 SSH 上传构建所需文件和模型，在目标妙算3上生成 TensorRT FP16 引擎。这里的构建命令对应 TensorRT 8.5 和 CUDA 11。机载程序需要 Python 3 的 TensorRT、OpenCV、NumPy 和 GStreamer GI 绑定，以及 NVIDIA 的 `nvv4l2decoder`、`nvvidconv` 和 `nvv4l2h264enc` 插件。[官方 YOLOX-s ONNX 下载](https://github.com/Megvii-BaseDetection/YOLOX/releases/download/0.1.1rc0/yolox_s.onnx)
 
 ```bash
 /usr/src/tensorrt/bin/trtexec --onnx=/absolute/path/yolox_s.onnx \
-  --saveEngine=/absolute/path/yolox_s.fp16.engine --fp16 --skipInference
+  --saveEngine=/absolute/path/yolox_s.fp16.engine --fp16 --buildOnly --heuristic \
+  --avgTiming=1 --workspace=1024 --tacticSources=-CUDNN \
+  --precisionConstraints=obey '--layerPrecisions=*:fp16'
 ```
 
 有线部署完成后，用机载 4G 上的 Tailscale 地址验收。先让 L3 处于可见光源，再从 PC 启动。
@@ -59,7 +61,7 @@ bash scripts/start_l3_preview_4g.sh \
 | --- | --- |
 | 可见光和二维点云画面切换 | 2026-11-17 实机完成 `14 → 1 → 14 → 1 → 14`，每段收到至少 30 帧新的 1920×1080 画面。 |
 | 机载 4G 回传 | 2026-11-18 的预览会话实际解码 2,995 帧 1920×1080 视频，包含 3 次重订阅，机载程序正常退出。长时间稳定回传仍待验收。 |
-| 机载 YOLO 人员检测 | 本机已用软件编解码回放验证 1080p 画框，并用合成首帧测试预览开关。妙算3硬件编解码、推理速度和带框画面的 4G 回传待实机验收。 |
+| 机载 YOLO 人员检测 | 2026-11-27 有线部署后，妙算3用公开样片输出带框 1080p 视频，PC 经 4G 解码并确认画框。实际 L3 可见光也经 4G 两次完成原画 → YOLO → 原画，其中一次使用 PC 窗口按钮。每段验证 60 帧。开启至首帧约 6.5–6.8 秒，关闭至恢复原画约 3.1 秒。 |
 | 实时 XYZ 激光点云 | 尚未取得有效点包。录制启动和 MOP 49154 连接成功后，`RecvData` 返回 `0x0000000f00000001` 或阻塞。详见[故障记录](docs/dji-support-2026-11-17/README.md)。 |
 | ROS 2 `PointCloud2` / RViz | 桥接与机载 4G 通路已用合成点流验证。真实 XYZ 接入仍依赖 L3 输出有效点包。 |
 

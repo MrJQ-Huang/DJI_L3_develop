@@ -676,7 +676,8 @@ static bool parse_number(const char *text, unsigned int minimum, unsigned int ma
 {
     size_t length = strlen(text);
     unsigned int parsed = 0U;
-    if (length == 0U || length > 5U) return false;
+    size_t max_length = maximum > 99999U ? 8U : 5U;
+    if (length == 0U || length > max_length) return false;
     for (size_t i = 0U; i < length; ++i) {
         if (text[i] < '0' || text[i] > '9') return false;
         parsed = parsed * 10U + (unsigned int)(text[i] - '0');
@@ -1366,7 +1367,10 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--yolo-engine") == 0 && yolo.engine == NULL && i + 1 < argc)
             yolo.engine = argv[++i];
         else if (strcmp(argv[i], "--yolo-bitrate") == 0 && !yolo.bitrate && i + 1 < argc) {
-            if (!parse_number(argv[++i], 500000U, 25000000U, &yolo.bitrate)) return 2;
+            if (!parse_number(argv[++i], 500000U, 25000000U, &yolo.bitrate)) {
+                fputs("--yolo-bitrate requires 500000..25000000 bit/s\n", stderr);
+                return 2;
+            }
         }
         else if (strcmp(argv[i], "--expected-source") == 0 && expected_source < 0 && i + 1 < argc) {
             unsigned int value;

@@ -175,9 +175,16 @@ def check_pipeline(gst, pipeline):
 
 
 def copy_frame(gst, video, sample):
-    info = video.VideoInfo.new_from_caps(sample.get_caps())
-    if info is None:
-        raise RuntimeError("invalid raw frame caps")
+    caps = sample.get_caps()
+    if hasattr(video.VideoInfo, "new_from_caps"):
+        info = video.VideoInfo.new_from_caps(caps)
+        if info is None:
+            raise RuntimeError("invalid raw frame caps")
+    else:
+        # JetPack 5 ships GStreamer 1.16, which fills an existing VideoInfo.
+        info = video.VideoInfo()
+        if not info.from_caps(caps):
+            raise RuntimeError("invalid raw frame caps")
     packet = sample.get_buffer()
     meta = video.buffer_get_video_meta(packet)
     stride, offset = (meta.stride[0], meta.offset[0]) if meta else (info.stride[0], info.offset[0])

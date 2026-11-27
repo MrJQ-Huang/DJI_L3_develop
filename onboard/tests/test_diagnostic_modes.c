@@ -93,6 +93,13 @@ L3PointProbeOutcome l3_point_probe_run(const L3PointProbeConfig *config,
 
 int main(void)
 {
+    unsigned int parsed = 0;
+    assert(parse_number("4000000", 500000U, 25000000U, &parsed) && parsed == 4000000U);
+    assert(parse_number("25000000", 500000U, 25000000U, &parsed) && parsed == 25000000U);
+    assert(!parse_number("25000001", 500000U, 25000000U, &parsed));
+    assert(!parse_number("09102", 500000U, 25000000U, &parsed));
+    assert(!parse_number("009102", 1U, 65535U, &parsed));
+
     assert(run_sdk_diagnostic((E_DjiMountPosition)0, 1, false) == 0);
     assert(liveview_inits == 0 && point_runs == 0);
     assert(run_sdk_diagnostic(DJI_MOUNT_POSITION_PAYLOAD_PORT_NO1, 1, true) == 0);
